@@ -192,11 +192,9 @@ brightness on the bedrock, a deep-to-light colour drift on the
 ocean -- so the far field varies the way a real surface does
 toward the horizon. The sea wears the same hexagons (its shade
 factor rides in the pattern texture's alpha, sampled at twice the
-bedrock tile). Distance haze on the planes is an exponential fade
-that never quite completes -- a fade that reaches 100% at a finite
-distance draws its own equal-distance arc on the plane, which
-reads as a curved white horizon floating in front of the real,
-straight one.
+bedrock tile). There is no distance haze anywhere: haze is a
+hack for masking the limits of finite renderers, and this one is
+infinity-first -- patterns run crisp to the true horizon.
 
 Blocks are one sandy colour all around (times the per-cell tint),
 lit by a hemisphere ambient (sky blue above, warm ground bounce
@@ -204,8 +202,8 @@ below), the warm sun, and a per-vertex ambient occlusion term
 counted from the neighbouring blocks crowding each face corner.
 The sun itself is a hexagon in the sky -- flat top and bottom,
 points east and west. Below the horizon the sky is deep ocean
-colour; below the bedrock the whole sky and haze turn nether red,
-like molten rock. A flat minimum ambient term keeps the darkest
+colour; below the bedrock the sky turns nether red, like molten
+rock. A flat minimum ambient term keeps the darkest
 block vertices readable. (The tint's first version used a structured hash at
 +/-10%: its low bits mirrored along the patch's symmetry axes and
 printed stripes and quadrant seams onto the terrain. The current
