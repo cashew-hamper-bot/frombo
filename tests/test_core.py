@@ -14,11 +14,12 @@ from rhombic_game.lattice import (
     NEIGHBOR_OFFSETS,
     FccCoord,
     GroundPatch,
+    GroundPatch111,
     _vertex_table,
     cell_mesh,
     rd_faces,
 )
-from rhombic_game.math3d import Camera, perspective_infinite
+from rhombic_game.math3d import Camera, perspective_infinite, ray_direction
 
 
 def ndc(m: np.ndarray, p: np.ndarray) -> np.ndarray:
@@ -198,3 +199,42 @@ class PlaneGeometryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroundPatch111Tests(unittest.TestCase):
+    def test_111_patch_geometry(self):
+        patch = GroundPatch111(radius=16.0, offset=(0.0, 0.0, 0.0))
+        # Centres lie in the world y = 0 plane (the rotated (111) plane).
+        for coord in patch.cells:
+            centre = patch.center_world(coord)
+            self.assertAlmostEqual(float(centre[1]), 0.0, places=9)
+            self.assertLessEqual(
+                math.hypot(float(centre[0]), float(centre[2])), 16.0 + 1e-9
+            )
+        self.assertTrue(300 < len(patch.cells) < 600)
+        verts, _ = patch.build_mesh()
+        # 3-valent vertex on top: peak height s * sqrt(3) / 2,
+        # lower than the {100} layer's 1.0.
+        self.assertAlmostEqual(
+            float(verts[:, 1].max()), math.sqrt(3.0) / 2.0, places=5
+        )
+        self.assertAlmostEqual(
+            float(verts[:, 1].min()), -math.sqrt(3.0) / 2.0, places=5
+        )
+
+
+class RayDirectionTests(unittest.TestCase):
+    def test_center_ray_is_forward(self):
+        cam = Camera()
+        cam.yaw, cam.pitch = 0.4, -0.25
+        inv = np.linalg.inv(cam.view_projection(1.1, 1.6, 0.1))
+        np.testing.assert_allclose(
+            ray_direction(inv, 0.0, 0.0), cam.forward(), atol=1e-9
+        )
+
+    def test_off_center_ray_bends_outward(self):
+        cam = Camera()
+        inv = np.linalg.inv(cam.view_projection(1.1, 1.6, 0.1))
+        right_ray = ray_direction(inv, 0.9, 0.0)
+        self.assertGreater(float(right_ray @ cam.right()), 0.5)
+        self.assertGreater(float(right_ray @ cam.forward()), 0.5)

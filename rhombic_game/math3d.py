@@ -48,6 +48,18 @@ def perspective_infinite(fov_y_rad: float, aspect: float, near: float) -> np.nda
     )
 
 
+def ray_direction(vp_inverse: np.ndarray, ndc_x: float, ndc_y: float) -> np.ndarray:
+    """World-space direction of the viewing ray through an NDC point.
+
+    With the infinite projection, NDC z = +1 is the plane at infinity,
+    so its inverse image is a homogeneous direction (w = 0): exactly
+    the ray direction, no near-point subtraction needed.
+    """
+    h = vp_inverse @ np.array([ndc_x, ndc_y, 1.0, 1.0])
+    d = h[:3]
+    return d / np.linalg.norm(d)
+
+
 def rotation_yaw_pitch(yaw: float, pitch: float) -> np.ndarray:
     """World-from-camera rotation R = Ry(yaw) @ Rx(pitch)."""
     cy, sy = math.cos(yaw), math.sin(yaw)

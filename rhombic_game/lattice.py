@@ -30,6 +30,7 @@ height ``s/2``.  That bumpiness is intrinsic to the medium, not a bug.
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -178,22 +179,57 @@ def _face_color(normal: np.ndarray, coord: FccCoord) -> np.ndarray:
     return base * _tint(coord)
 
 
+def rotation_y_to(direction) -> np.ndarray:
+    """Rotation matrix carrying +Y onto the given direction (Rodrigues)."""
+    d = np.asarray(direction, dtype=np.float64)
+    d = d / np.linalg.norm(d)
+    y = np.array([0.0, 1.0, 0.0])
+    v = np.cross(y, d)
+    s = float(np.linalg.norm(v))
+    c = float(y @ d)
+    if s < 1e-12:
+        return np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+    vx = np.array(
+        [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]]
+    )
+    return np.eye(3) + vx + vx @ vx * ((1.0 - c) / (s * s))
+
+
 class GroundPatch:
     """A one-cell-thick layer of cells, about 30 m across.
 
-    Centres sit at j = 0 with i, k in [-half, +half] and i + k even
-    (the parity invariant with j = 0).  The layer's peaks reach y = +s
-    and its bottom points reach y = -s.
+    This is the {100} cleavage: centres sit at j = 0 with i, k in
+    [-half, +half] and i + k even (the parity invariant with j = 0),
+    so a 4-valent cell vertex points straight up.  The layer's peaks
+    reach y = +s and its bottom points reach y = -s.
+
+    An optional rotation reorients the whole lattice (cell geometry
+    and centre positions alike) and an optional offset translates the
+    patch in the world; GroundPatch111 uses both.
     """
 
-    def __init__(self, half: int = 15, s: float = DEFAULT_S):
+    def __init__(
+        self,
+        half: int = 15,
+        s: float = DEFAULT_S,
+        rotation: np.ndarray | None = None,
+        offset=(0.0, 0.0, 0.0),
+    ):
         self.s = s
-        self.cells: list[FccCoord] = [
+        self.rotation = np.eye(3) if rotation is None else rotation
+        self.offset = np.asarray(offset, dtype=np.float64)
+        self.cells: list[FccCoord] = self._lattice_coords(half)
+
+    def _lattice_coords(self, half: int) -> list[FccCoord]:
+        return [
             FccCoord(i, 0, k)
             for i in range(-half, half + 1)
             for k in range(-half, half + 1)
             if (i + k) % 2 == 0
         ]
+
+    def center_world(self, coord: FccCoord) -> np.ndarray:
+        return self.offset + self.rotation @ coord.to_world(self.s)
 
     def build_mesh(self):
         """Merged static mesh.
@@ -206,12 +242,16 @@ class GroundPatch:
         pairs, and cancel out of the sum by themselves.
         """
         pos, nrm, idx = cell_mesh(self.s)
+        rot = self.rotation
         # First pass: world positions and flat normals.
         placed: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         for coord in self.cells:
-            origin = coord.to_world(self.s)
+            origin = self.center_world(coord)
             for n in range(len(pos)):
-                placed.append((pos[n] + origin, nrm[n], _face_color(nrm[n], coord)))
+                world_n = rot @ nrm[n]
+                placed.append(
+                    (rot @ pos[n] + origin, world_n, _face_color(world_n, coord))
+                )
         # Smooth normals: group vertices by world position.
         sums: dict[tuple[float, float, float], np.ndarray] = {}
         for p, n, _ in placed:
@@ -233,3 +273,44 @@ class GroundPatch:
             np.array(verts_out, dtype=np.float32),
             np.array(idx_out, dtype=np.uint32),
         )
+
+
+class GroundPatch111(GroundPatch):
+    """The other cleavage: a {111} layer of the same lattice.
+
+    Centres are the FCC points with i + j + k = 0 -- a triangular
+    lattice in the (111) plane -- and the whole lattice is rotated so
+    that the (1, 1, 1) direction points straight up.  A 3-valent
+    (cube) vertex of each cell then tops the layer, at height
+    s * sqrt(3) / 2 ~= 0.866 s instead of the {100} layer's 1.0 s,
+    and the surface pattern is threefold rather than fourfold --
+    built so the two cleavages can be compared side by side.
+    """
+
+    def __init__(
+        self,
+        radius: float = 16.0,
+        s: float = DEFAULT_S,
+        offset=(0.0, 0.0, -75.0),
+    ):
+        self.radius = radius
+        super().__init__(
+            half=0,
+            s=s,
+            # The transpose of "y onto (1,1,1)" is "(1,1,1) onto y":
+            # centres with i+j+k = 0 then land in the world y = 0
+            # plane, and each cell's (1,1,1) vertex points up.
+            rotation=rotation_y_to((1.0, 1.0, 1.0)).T,
+            offset=offset,
+        )
+
+    def _lattice_coords(self, half: int) -> list[FccCoord]:
+        out: list[FccCoord] = []
+        lim = int(self.radius / self.s) + 2
+        for i in range(-lim, lim + 1):
+            for j in range(-lim, lim + 1):
+                coord = FccCoord(i, j, -(i + j))
+                p = self.rotation @ coord.to_world(self.s)
+                if math.hypot(float(p[0]), float(p[2])) <= self.radius:
+                    out.append(coord)
+        return out
