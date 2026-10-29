@@ -255,11 +255,27 @@ class RDWidget(QOpenGLWidget):
         Sampled at a 500 m period by both plane shaders for
         large-scale colour variation toward the horizon.
         """
-        rng = np.random.default_rng(20261029)
         n = 256
         out = np.zeros((n, n))
         for cells, weight in ((16, 0.65), (32, 0.35)):
-            grid = rng.random((cells, cells))
+            # Deterministic hash grid (splitmix64) instead of
+            # np.random: the noise is fixed either way, and this
+            # keeps the app from importing numpy.random at all --
+            # that submodule fails to load in at least one real
+            # environment (Christopher's Python 3.10, 2026-10-29),
+            # while core numpy works fine there.
+            ii, jj = np.meshgrid(
+                np.arange(cells), np.arange(cells), indexing="ij"
+            )
+            h = (
+                ii.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)
+                ^ jj.astype(np.uint64) * np.uint64(0xC2B2AE3D27D4EB4F)
+                ^ np.uint64(0x165667B19E3779F9)
+            )
+            h ^= h >> np.uint64(29)
+            h *= np.uint64(0xBF58476D1CE4E5B9)
+            h ^= h >> np.uint64(32)
+            grid = (h >> np.uint64(11)).astype(np.float64) / float(1 << 53)
             fy = np.arange(n) * cells / n
             iy = np.floor(fy).astype(int)
             ty = fy - iy
