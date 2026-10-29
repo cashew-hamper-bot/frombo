@@ -411,3 +411,45 @@ def wall_cells_111_b() -> list[FccCoord]:
         for px, py, pz in base[1:]:
             cells.append(FccCoord(px + ox, py + oy, pz + oz))
     return cells
+
+
+def wall_cells_100_b() -> list[FccCoord]:
+    """Second {100} wall, adjoining wall A at 90 degrees.
+
+    In the cubic frame 90 degrees is a natural direction (unlike
+    {111}): this wall runs along k at wall A's end column (i = 5),
+    with the same staggered courses.
+    """
+    return [
+        FccCoord(5, j, k)
+        for j in range(1, 5)
+        for k in range(0, 11)
+        if (5 + j + k) % 2 == 0
+    ]
+
+
+def column_cells_100() -> list[FccCoord]:
+    """The best single column on the {100} patch: 8 courses up.
+
+    A cell directly overhead is not a lattice cell, so the column
+    alternates (1,1,0) and (-1,1,0) steps -- each course face-bonds
+    to the one below and the sideways wobble cancels every two
+    courses.  Stands on the patch cell (10, 0, 10).
+    """
+    return [FccCoord(10 + (j % 2), j, 10) for j in range(1, 9)]
+
+
+def column_cells_111() -> list[FccCoord]:
+    """The best single column on the {111} patch: 8 courses up.
+
+    Uses the cycling course offsets (ABC stacking), so after every
+    three courses the column is exactly over its base again; the
+    sideways excursion never exceeds ~0.82 m.  Stands on the patch
+    cell (-6, 3, 3).
+    """
+    bx, by, bz = -6, 3, 3
+    cells = []
+    for c in range(1, 9):
+        ox, oy, oz = _course_offset(c)
+        cells.append(FccCoord(bx + ox, by + oy, bz + oz))
+    return cells

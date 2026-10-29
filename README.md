@@ -45,6 +45,7 @@ Python ≥ 3.10. Controls:
 | C / Q / O | down |
 | drag, primary mouse button | look, grab-the-world style, exact 1:1 tracking at infinity |
 | wheel | fly speed |
+| hold Shift | 10x speed boost while held (the HUD shows the boosted speed) |
 | G | toggle flat / Gouraud shading on the ground patch |
 | Esc | quit |
 
@@ -161,12 +162,25 @@ but with the real nouns in place:
   blocks long: `wall_cells_100`, `wall_cells_111`), for judging
   vertical surfaces in both cleavages. In {111} the course offsets
   cycle through the three nestling directions, so the wall zigzags
-  by at most ~0.82 m but rises straight on average. The {111} patch
-  also has a second wall (`wall_cells_111_b`) adjoining the first
-  at 90 degrees: the plane's lattice directions only meet at
+  by at most ~0.82 m but rises straight on average. Both patches
+  have a second wall adjoining the first at 90 degrees: on {100}
+  that is a natural lattice direction (`wall_cells_100_b`, an exact
+  corner); on {111} the plane's lattice directions only meet at
   60/120 degrees, so the 90-degree wall staircases along (1,1,-2),
   alternating (1,0,-1) and (0,1,-1) steps about the true line
-  (see `docs/walls-111-corner.png`).
+  (`wall_cells_111_b`, see `docs/walls-111-corner.png`).
+- **Columns**: the best single column each lattice offers stands
+  on each patch, 8 courses up (`column_cells_100`,
+  `column_cells_111`). Neither lattice has a cell directly overhead,
+  so both columns nestle course-to-course with a small sideways
+  wobble that cancels -- alternating steps on {100}, the ABC cycle
+  on {111}.
+
+The infinite planes sample a mipmapped pattern texture (16 m tile)
+with explicit gradients, so the GPU's anisotropic filtering (up to
+16x) integrates the true elongated footprint at grazing angles;
+an earlier procedural box filter washed the bedrock pattern out
+and shimmered at mid distance.
 
 Face colours are a base per orientation class times a per-cell
 tint of +/-3%. (The tint's first version used a structured hash at
