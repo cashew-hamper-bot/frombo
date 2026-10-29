@@ -7,13 +7,15 @@ Scene, in draw order:
    far plane of the infinite projection.
 2. One layer of rhombic dodecahedron cells, roughly 30 m x 30 m,
    static and deliberately unoptimised (one merged VBO).
-3. The complete infinite bedrock plane at y = -1 (4-vertex strip).
-4. The infinite sea plane at y = +0.5 with a ~1000 m hole around the
+3. The complete infinite bedrock plane at y = -100 (4-vertex strip).
+4. The infinite sea plane at y = -10 with a ~1000 m hole around the
    player (rim/horizon strip), blended.
 
-Navigation: fly with WASD or IJKL (both live at once, IJKL being the
-right-hand set for left-mousers), Space/C for up/down, drag with the
-primary mouse button to look, wheel adjusts fly speed.
+Navigation: WASD or IJKL (both live at once, IJKL being the
+right-hand set for left-mousers) move in the current horizontal
+plane, Space/C for up/down, grab-the-world dragging with the primary
+mouse button to look, wheel adjusts fly speed, G toggles flat vs
+Gouraud shading on the ground patch.
 """
 
 from __future__ import annotations
@@ -89,6 +91,7 @@ class RDWidget(QOpenGLWidget):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.camera = Camera()
+        self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._keys: set[int] = set()
         self._last_mouse = None
         self._clock = QElapsedTimer()
@@ -134,8 +137,8 @@ class RDWidget(QOpenGLWidget):
         gl.glBufferData(gl.GL_ARRAY_BUFFER, verts.nbytes, verts, gl.GL_STATIC_DRAW)
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
         gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, idx.nbytes, idx, gl.GL_STATIC_DRAW)
-        stride = 9 * 4
-        for loc, offset in ((0, 0), (1, 12), (2, 24)):
+        stride = 12 * 4
+        for loc, offset in ((0, 0), (1, 12), (2, 24), (3, 36)):
             gl.glEnableVertexAttribArray(loc)
             gl.glVertexAttribPointer(
                 loc, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, gl.GLvoidp(offset)
@@ -167,9 +170,15 @@ class RDWidget(QOpenGLWidget):
             up = 1.0
         if self._pressed(K.Key_C, K.Key_Q, K.Key_O):
             down = 1.0
+        # Movement stays in the current horizontal plane: forward and
+        # strafe follow the view azimuth only, never the pitch, so
+        # looking down and pressing W does not descend.
+        fxz = cam.forward_xz()
+        forward3 = np.array([fxz[0], 0.0, fxz[1]])
+        right3 = np.array([-fxz[1], 0.0, fxz[0]])
         move = (
-            cam.forward() * (fwd - back)
-            + cam.right() * (right - left)
+            forward3 * (fwd - back)
+            + right3 * (right - left)
             + np.array([0.0, 1.0, 0.0]) * (up - down)
         )
         if np.any(move):
@@ -204,6 +213,7 @@ class RDWidget(QOpenGLWidget):
 
         # 2. Local RD ground.
         gl.glUseProgram(self._block_prog)
+        gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
@@ -259,6 +269,9 @@ class RDWidget(QOpenGLWidget):
         if event.key() == Qt.Key.Key_Escape:
             self.window().close()
             return
+        if event.key() == Qt.Key.Key_G and not event.isAutoRepeat():
+            self._smooth = 0.0 if self._smooth else 1.0
+            return
         if not event.isAutoRepeat():
             self._keys.add(event.key())
         super().keyPressEvent(event)
@@ -278,9 +291,15 @@ class RDWidget(QOpenGLWidget):
             event.buttons() & Qt.MouseButton.LeftButton
         ):
             d = event.position() - self._last_mouse
-            self.camera.yaw -= d.x() * 0.005
+            # Grab-the-world dragging: the scene follows the cursor,
+            # as in panorama viewers and map apps.  This is the
+            # opposite sense from FPS mouse-look, where the viewpoint
+            # follows the mouse (drag right = look right).  Here drag
+            # right pulls the world right, so the view turns left;
+            # drag down pulls the world down, so the view looks up.
+            self.camera.yaw += d.x() * 0.005
             self.camera.pitch = float(
-                np.clip(self.camera.pitch - d.y() * 0.005, -1.55, 1.55)
+                np.clip(self.camera.pitch + d.y() * 0.005, -1.55, 1.55)
             )
         self._last_mouse = event.position()
         super().mouseMoveEvent(event)
@@ -311,7 +330,8 @@ class MainWindow(QMainWindow):
             "padding: 6px 10px; font-family: monospace; font-size: 12px;"
         )
         self._hud.setText(
-            "WASD / IJKL fly - Space up, C down - drag to look - wheel: speed - Esc: quit"
+            "WASD / IJKL move (horizontal plane) - Space up, C down - "
+            "drag world to look - wheel: speed - G: flat/Gouraud - Esc: quit"
         )
         self._hud.move(10, 10)
         self._hud.adjustSize()
