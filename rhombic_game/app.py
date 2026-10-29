@@ -26,7 +26,7 @@ import sys
 import numpy as np
 from OpenGL import GL as gl
 from PySide6.QtCore import QElapsedTimer, Qt, QTimer
-from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtGui import QCursor, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 
@@ -35,15 +35,9 @@ from .lattice import (
     DEFAULT_S,
     PATCH111_OFFSET,
     PATCH111_ROTATION,
-    GroundPatch,
-    GroundPatch111,
     build_cells_mesh,
-    column_cells_100,
-    column_cells_111,
-    wall_cells_100,
-    wall_cells_100_b,
-    wall_cells_111,
-    wall_cells_111_b,
+    island_cells_100,
+    island_cells_111,
 )
 from .math3d import Camera, drag_glue
 
@@ -106,6 +100,9 @@ class RDWidget(QOpenGLWidget):
         self.camera = Camera()
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
+        self._captured = False  # Minecraft-like mouse capture (FPS look)
+        self._skip_move = False  # swallow the recenter synthetic move
+        self._press_pos = None  # for click-vs-drag detection
         self._keys: set[int] = set()
         self._last_mouse = None
         self._clock = QElapsedTimer()
@@ -124,7 +121,8 @@ class RDWidget(QOpenGLWidget):
         self._bedrock_prog = _program(shaders.PLANE_VERT, shaders.PLANE_FRAGS["bedrock"])
         self._sea_prog = _program(shaders.PLANE_VERT, shaders.PLANE_FRAGS["sea"])
         self._block_prog = _program(shaders.BLOCK_VERT, shaders.BLOCK_FRAG)
-        self._checker_tex = self._make_checker_texture()
+        self._checker_tex = self._make_pattern_texture()
+        self._noise_tex = self._make_noise_texture()
 
         # Skybox cube (directions).
         corners, idx = planes.skybox_cube()
@@ -141,36 +139,17 @@ class RDWidget(QOpenGLWidget):
         gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
         gl.glBindVertexArray(0)
 
-        # Ground patches (static, unoptimised merged meshes): the
-        # {100} cleavage at the origin and the {111} cleavage 75 m
-        # ahead, for side-by-side comparison.
+        # Two islands, one merged mesh each (patch + walls + column),
+        # so smooth normals and ambient occlusion see across the
+        # joins: the {100} cleavage at the origin and the {111}
+        # cleavage 75 m ahead, for side-by-side comparison.
         self._patches = [
-            self._make_patch_vao(GroundPatch()),
-            self._make_patch_vao(GroundPatch111()),
-            # One wall segment on each patch (~4 high, ~5 long), so
-            # vertical surfaces can be judged in both cleavages.
             self._vao_from_mesh(
-                *build_cells_mesh(wall_cells_100(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
+                *build_cells_mesh(island_cells_100(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
             ),
             self._vao_from_mesh(
                 *build_cells_mesh(
-                    wall_cells_111(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
-                )
-            ),
-            self._vao_from_mesh(
-                *build_cells_mesh(
-                    wall_cells_111_b(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
-                )
-            ),
-            self._vao_from_mesh(
-                *build_cells_mesh(wall_cells_100_b(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
-            ),
-            self._vao_from_mesh(
-                *build_cells_mesh(column_cells_100(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
-            ),
-            self._vao_from_mesh(
-                *build_cells_mesh(
-                    column_cells_111(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
+                    island_cells_111(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
                 )
             ),
         ]
@@ -180,41 +159,13 @@ class RDWidget(QOpenGLWidget):
         self._clock.start()
 
     @staticmethod
-    def _make_checker_texture() -> int:
-        """The planes' pattern texture: one 16 m tile at 512 px.
-
-        RGB bakes the bedrock look (8 m checkerboard plus 1 m and
-        8 m grid lines); alpha holds the bare checker factor for the
-        sea.  Rendered at 2x and box-downsampled so the texture
-        itself is antialiased; mipmaps + anisotropic filtering (up
-        to 16x where the driver offers it) do the distance work.
-        """
-        n_hi, n = 1024, 512
-        axis = (np.arange(n_hi) + 0.5) * (16.0 / n_hi)  # metres
-        x, z = np.meshgrid(axis, axis)
-        check = ((np.floor(x / 8.0) + np.floor(z / 8.0)) % 2).astype(np.float64)
-        dark = np.array([0.30, 0.28, 0.26])
-        light = np.array([0.56, 0.53, 0.49])
-        rgb = dark[None, None, :] * (1 - check[..., None]) + light[None, None, :] * check[..., None]
-
-        px_m = 16.0 / n_hi  # one hi-res pixel in metres
-        a1 = np.abs(np.mod(x - 0.5, 1.0) - 0.5) / px_m
-        a1z = np.abs(np.mod(z - 0.5, 1.0) - 0.5) / px_m
-        line1 = 1.0 - np.minimum(np.minimum(a1, a1z), 1.0)
-        g8x, g8z = x / 8.0, z / 8.0
-        a8 = np.abs(np.mod(g8x - 0.5, 1.0) - 0.5) / (px_m / 8.0)
-        a8z = np.abs(np.mod(g8z - 0.5, 1.0) - 0.5) / (px_m / 8.0)
-        line8 = 1.0 - np.minimum(np.minimum(a8, a8z), 1.0)
-        rgb = rgb * (1 - line1[..., None] * 0.25) + np.array([0.16, 0.15, 0.14]) * (line1[..., None] * 0.25)
-        rgb = rgb * (1 - line8[..., None] * 0.50) + np.array([0.10, 0.10, 0.10]) * (line8[..., None] * 0.50)
-
-        rgba = np.concatenate([rgb, check[..., None]], axis=2)
-        rgba = rgba.reshape(n, 2, n, 2, 4).mean(axis=(1, 3))  # 2x2 downsample
+    def _upload_texture(rgba: np.ndarray) -> int:
+        """Upload an RGBA float image as a mipmapped, aniso texture."""
+        n_z, n_x = rgba.shape[:2]
         data = np.ascontiguousarray((np.clip(rgba, 0.0, 1.0) * 255).astype(np.uint8))
-
         tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, n, n, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, n_x, n_z, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data)
         gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT)
@@ -231,6 +182,103 @@ class RDWidget(QOpenGLWidget):
         return tex
 
     @classmethod
+    def _make_pattern_texture(cls) -> int:
+        """The planes' pattern texture: a rectangular tile (42 m x
+        24.25 m) with hexagonal symmetry.
+
+        RGB bakes the bedrock look: flat-top small hexagons (points
+        east/west, matching the sun), 3-coloured with a per-hex tint,
+        grouped into big hexagons whose centre spacing is 7 small
+        spacings -- 49 small hexes by area; a count of the lattice
+        gives 50 small centres per big hex, ~38 fully inside and 12
+        exactly bisected by the parent edge.  Alpha holds the bare
+        2x2 checker factor for the sea.  Hexagonal tilings have no
+        square period, hence the rectangular tile; its edges were
+        verified to match exactly.
+        """
+        a_hex = 2.0
+        sq3 = math.sqrt(3.0)
+        tile_x, tile_z = 42.0, 7.0 * sq3 * a_hex
+        nx, nz = 1344, 776
+
+        def cube_round(q, r):
+            s = -q - r
+            qi, ri, si = np.round(q), np.round(r), np.round(s)
+            dq, dr, ds = np.abs(qi - q), np.abs(ri - r), np.abs(si - s)
+            fq = (dq > dr) & (dq > ds)
+            fr = (~fq) & (dr > ds)
+            qi = np.where(fq, -ri - si, qi)
+            ri = np.where(fr, -qi - si, ri)
+            return qi, ri
+
+        def hex_sdf(vx, vz, apothem):
+            return np.maximum(
+                np.abs(vz),
+                np.maximum(
+                    np.abs(0.8660254 * vx + 0.5 * vz),
+                    np.abs(0.8660254 * vx - 0.5 * vz),
+                ),
+            ) - apothem
+
+        xs = (np.arange(nx) + 0.5) * (tile_x / nx)
+        zs = (np.arange(nz) + 0.5) * (tile_z / nz)
+        x, z = np.meshgrid(xs, zs)
+        q = (2.0 / 3.0 * x) / a_hex
+        r = (-1.0 / 3.0 * x + sq3 / 3.0 * z) / a_hex
+        qi, ri = cube_round(q, r)
+        cx = a_hex * 1.5 * qi
+        cz = a_hex * sq3 * (ri + qi / 2.0)
+        sdf_s = hex_sdf(x - cx, z - cz, a_hex * sq3 / 2.0)
+        palette = np.array(
+            [[0.44, 0.42, 0.40], [0.50, 0.48, 0.45], [0.39, 0.37, 0.35]]
+        )
+        rgb = palette[(qi - ri).astype(int) % 3]
+        hsh = ((qi.astype(np.int64) * 73856093) ^ (ri.astype(np.int64) * 19349663)) & 0xFFFF
+        rgb = rgb * (0.94 + 0.12 * (hsh / 0xFFFF))[..., None]
+        edge = np.clip((sdf_s + 0.14) / 0.14, 0.0, 1.0)
+        rgb = rgb * (1 - edge[..., None] * 0.45) + np.array([0.20, 0.19, 0.18]) * (edge[..., None] * 0.45)
+        big_q, big_r = cube_round((q - 0.5) / 7.0, r / 7.0)
+        q_c, r_c = 7.0 * big_q + 0.5, 7.0 * big_r
+        bcx = a_hex * 1.5 * q_c
+        bcz = a_hex * sq3 * (r_c + q_c / 2.0)
+        sdf_b = hex_sdf(x - bcx, z - bcz, 7.0 * sq3 * a_hex / 2.0)
+        bedge = np.clip((sdf_b + 0.45) / 0.45, 0.0, 1.0)
+        rgb = rgb * (1 - bedge[..., None] * 0.62) + np.array([0.13, 0.12, 0.11]) * (bedge[..., None] * 0.62)
+        alpha = ((np.floor(2 * x / tile_x) + np.floor(2 * z / tile_z)) % 2)
+        rgba = np.concatenate([rgb, alpha[..., None]], axis=2)
+        return cls._upload_texture(rgba)
+
+    @classmethod
+    def _make_noise_texture(cls) -> int:
+        """Tileable value noise (two octaves), 256 px, grey in RGB.
+
+        Sampled at a 500 m period by both plane shaders for
+        large-scale colour variation toward the horizon.
+        """
+        rng = np.random.default_rng(20261029)
+        n = 256
+        out = np.zeros((n, n))
+        for cells, weight in ((16, 0.65), (32, 0.35)):
+            grid = rng.random((cells, cells))
+            fy = np.arange(n) * cells / n
+            iy = np.floor(fy).astype(int)
+            ty = fy - iy
+            ty = ty * ty * (3 - 2 * ty)
+            fx = np.arange(n) * cells / n
+            ix = np.floor(fx).astype(int)
+            tx = fx - ix
+            tx = tx * tx * (3 - 2 * tx)
+            v00 = grid[np.ix_(iy % cells, ix % cells)]
+            v01 = grid[np.ix_(iy % cells, (ix + 1) % cells)]
+            v10 = grid[np.ix_((iy + 1) % cells, ix % cells)]
+            v11 = grid[np.ix_((iy + 1) % cells, (ix + 1) % cells)]
+            top = v00 * (1 - tx)[None, :] + v01 * tx[None, :]
+            bot = v10 * (1 - tx)[None, :] + v11 * tx[None, :]
+            out += weight * (top * (1 - ty)[:, None] + bot * ty[:, None])
+        rgba = np.stack([out, out, out, np.ones_like(out)], axis=2)
+        return cls._upload_texture(rgba)
+
+    @classmethod
     def _make_patch_vao(cls, patch):
         return cls._vao_from_mesh(*patch.build_mesh())
 
@@ -244,11 +292,11 @@ class RDWidget(QOpenGLWidget):
         gl.glBufferData(gl.GL_ARRAY_BUFFER, verts.nbytes, verts, gl.GL_STATIC_DRAW)
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
         gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, idx.nbytes, idx, gl.GL_STATIC_DRAW)
-        stride = 12 * 4
-        for loc, offset in ((0, 0), (1, 12), (2, 24), (3, 36)):
+        stride = 13 * 4
+        for loc, offset, size in ((0, 0, 3), (1, 12, 3), (2, 24, 3), (3, 36, 3), (4, 48, 1)):
             gl.glEnableVertexAttribArray(loc)
             gl.glVertexAttribPointer(
-                loc, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, gl.GLvoidp(offset)
+                loc, size, gl.GL_FLOAT, gl.GL_FALSE, stride, gl.GLvoidp(offset)
             )
         gl.glBindVertexArray(0)
         return vao, len(idx)
@@ -347,6 +395,10 @@ class RDWidget(QOpenGLWidget):
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
         gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
+        gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uNoise"), 1)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
         self._bedrock.draw()
 
         # 4. Infinite sea plane with the hole around the player.
@@ -364,6 +416,10 @@ class RDWidget(QOpenGLWidget):
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
         gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
+        gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uNoise"), 1)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
         self._sea.draw()
         gl.glDepthMask(gl.GL_TRUE)
         gl.glDisable(gl.GL_BLEND)
@@ -372,17 +428,23 @@ class RDWidget(QOpenGLWidget):
         if self.on_hud is not None and self._frame % 6 == 0:
             p = cam.position
             boost = "  x10 BOOST" if self._boost > 1.0 else ""
+            mode = "  MOUSE CAPTURED (Esc to release)" if self._captured else ""
             self.on_hud(
                 f"pos ({p[0]:7.1f}, {p[1]:6.1f}, {p[2]:7.1f})   "
                 f"speed {cam.move_speed * self._boost:5.1f} m/s{boost}   "
-                f"yaw {math.degrees(cam.yaw):6.1f} deg   pitch {math.degrees(cam.pitch):6.1f} deg"
+                f"yaw {math.degrees(cam.yaw):6.1f} deg   pitch {math.degrees(cam.pitch):6.1f} deg{mode}"
             )
 
     # -- input ----------------------------------------------------------
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            self.window().close()
+            # Esc always leaves mouse capture first; only a second
+            # Esc (while uncaptured) quits.
+            if self._captured:
+                self._set_captured(False)
+            else:
+                self.window().close()
             return
         if event.key() == Qt.Key.Key_G and not event.isAutoRepeat():
             self._smooth = 0.0 if self._smooth else 1.0
@@ -396,8 +458,26 @@ class RDWidget(QOpenGLWidget):
             self._keys.discard(event.key())
         super().keyReleaseEvent(event)
 
+    def _set_captured(self, on: bool) -> None:
+        self._captured = on
+        if on:
+            self.grabMouse()
+            self.setCursor(Qt.CursorShape.BlankCursor)
+            center = self.mapToGlobal(self.rect().center())
+            self._skip_move = True
+            QCursor.setPos(center)
+        else:
+            self.releaseMouse()
+            self.unsetCursor()
+
     def mousePressEvent(self, event) -> None:
+        if self._captured:
+            # A click while captured releases back to grab-the-world.
+            self._set_captured(False)
+            super().mousePressEvent(event)
+            return
         self._last_mouse = event.position()
+        self._press_pos = event.position()
         self.setFocus()
         super().mousePressEvent(event)
 
@@ -423,6 +503,31 @@ class RDWidget(QOpenGLWidget):
         drag_glue(self.camera, FOV_Y, w / h, NEAR, ndc(self._last_mouse), ndc(new_pos))
 
     def mouseMoveEvent(self, event) -> None:
+        if self._captured:
+            if self._skip_move:
+                self._skip_move = False
+                super().mouseMoveEvent(event)
+                return
+            center = self.mapToGlobal(self.rect().center())
+            delta = event.globalPosition() - center
+            if delta.x() != 0.0 or delta.y() != 0.0:
+                # Same angular scale as grab-the-world drag at the
+                # screen centre, FPS sense (Minecraft-like).
+                w = max(1.0, float(self.width()))
+                h = max(1.0, float(self.height()))
+                tan_y = math.tan(FOV_Y / 2.0)
+                self.camera.yaw -= float(delta.x()) * (2.0 * tan_y * (w / h) / w)
+                self.camera.pitch = float(
+                    np.clip(
+                        self.camera.pitch - float(delta.y()) * (2.0 * tan_y / h),
+                        -1.55,
+                        1.55,
+                    )
+                )
+                self._skip_move = True
+                QCursor.setPos(center)
+            super().mouseMoveEvent(event)
+            return
         if self._last_mouse is not None and (
             event.buttons() & Qt.MouseButton.LeftButton
         ):
@@ -431,6 +536,17 @@ class RDWidget(QOpenGLWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        # A click (press + release without dragging) toggles the
+        # Minecraft-like mouse capture.
+        if (
+            not self._captured
+            and self._press_pos is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            moved = event.position() - self._press_pos
+            if moved.manhattanLength() < 5.0:
+                self._set_captured(True)
+        self._press_pos = None
         self._last_mouse = None
         super().mouseReleaseEvent(event)
 
