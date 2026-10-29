@@ -38,7 +38,10 @@ from .lattice import (
     GroundPatch,
     GroundPatch111,
     build_cells_mesh,
+    column_cells_100,
+    column_cells_111,
     wall_cells_100,
+    wall_cells_100_b,
     wall_cells_111,
     wall_cells_111_b,
 )
@@ -102,6 +105,7 @@ class RDWidget(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.camera = Camera()
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
+        self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._keys: set[int] = set()
         self._last_mouse = None
         self._clock = QElapsedTimer()
@@ -120,6 +124,7 @@ class RDWidget(QOpenGLWidget):
         self._bedrock_prog = _program(shaders.PLANE_VERT, shaders.PLANE_FRAGS["bedrock"])
         self._sea_prog = _program(shaders.PLANE_VERT, shaders.PLANE_FRAGS["sea"])
         self._block_prog = _program(shaders.BLOCK_VERT, shaders.BLOCK_FRAG)
+        self._checker_tex = self._make_checker_texture()
 
         # Skybox cube (directions).
         corners, idx = planes.skybox_cube()
@@ -157,11 +162,73 @@ class RDWidget(QOpenGLWidget):
                     wall_cells_111_b(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
                 )
             ),
+            self._vao_from_mesh(
+                *build_cells_mesh(wall_cells_100_b(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
+            ),
+            self._vao_from_mesh(
+                *build_cells_mesh(column_cells_100(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
+            ),
+            self._vao_from_mesh(
+                *build_cells_mesh(
+                    column_cells_111(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
+                )
+            ),
         ]
 
         self._bedrock = _DynamicStrip()
         self._sea = _DynamicStrip()
         self._clock.start()
+
+    @staticmethod
+    def _make_checker_texture() -> int:
+        """The planes' pattern texture: one 16 m tile at 512 px.
+
+        RGB bakes the bedrock look (8 m checkerboard plus 1 m and
+        8 m grid lines); alpha holds the bare checker factor for the
+        sea.  Rendered at 2x and box-downsampled so the texture
+        itself is antialiased; mipmaps + anisotropic filtering (up
+        to 16x where the driver offers it) do the distance work.
+        """
+        n_hi, n = 1024, 512
+        axis = (np.arange(n_hi) + 0.5) * (16.0 / n_hi)  # metres
+        x, z = np.meshgrid(axis, axis)
+        check = ((np.floor(x / 8.0) + np.floor(z / 8.0)) % 2).astype(np.float64)
+        dark = np.array([0.30, 0.28, 0.26])
+        light = np.array([0.56, 0.53, 0.49])
+        rgb = dark[None, None, :] * (1 - check[..., None]) + light[None, None, :] * check[..., None]
+
+        px_m = 16.0 / n_hi  # one hi-res pixel in metres
+        a1 = np.abs(np.mod(x - 0.5, 1.0) - 0.5) / px_m
+        a1z = np.abs(np.mod(z - 0.5, 1.0) - 0.5) / px_m
+        line1 = 1.0 - np.minimum(np.minimum(a1, a1z), 1.0)
+        g8x, g8z = x / 8.0, z / 8.0
+        a8 = np.abs(np.mod(g8x - 0.5, 1.0) - 0.5) / (px_m / 8.0)
+        a8z = np.abs(np.mod(g8z - 0.5, 1.0) - 0.5) / (px_m / 8.0)
+        line8 = 1.0 - np.minimum(np.minimum(a8, a8z), 1.0)
+        rgb = rgb * (1 - line1[..., None] * 0.25) + np.array([0.16, 0.15, 0.14]) * (line1[..., None] * 0.25)
+        rgb = rgb * (1 - line8[..., None] * 0.50) + np.array([0.10, 0.10, 0.10]) * (line8[..., None] * 0.50)
+
+        rgba = np.concatenate([rgb, check[..., None]], axis=2)
+        rgba = rgba.reshape(n, 2, n, 2, 4).mean(axis=(1, 3))  # 2x2 downsample
+        data = np.ascontiguousarray((np.clip(rgba, 0.0, 1.0) * 255).astype(np.uint8))
+
+        tex = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, n, n, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, data)
+        gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        # EXT_texture_filter_anisotropic (0x84FE / 0x84FF); near-
+        # universally available, but degrade to plain mipmaps if not.
+        try:
+            max_aniso = float(gl.glGetFloatv(0x84FF))
+            gl.glTexParameterf(gl.GL_TEXTURE_2D, 0x84FE, min(16.0, max_aniso))
+        except Exception:
+            pass
+        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        return tex
 
     @classmethod
     def _make_patch_vao(cls, patch):
@@ -218,8 +285,11 @@ class RDWidget(QOpenGLWidget):
             + right3 * (right - left)
             + np.array([0.0, 1.0, 0.0]) * (up - down)
         )
+        # Hold Shift for a 10x speed boost -- the travel gesture for
+        # crossing the gaps between islands (and, later, real maps).
+        self._boost = 10.0 if self._pressed(Qt.Key.Key_Shift) else 1.0
         if np.any(move):
-            cam.position = cam.position + move * (cam.move_speed * dt)
+            cam.position = cam.position + move * (cam.move_speed * self._boost * dt)
 
     def paintGL(self) -> None:
         dt = min(self._clock.restart() / 1000.0, 0.05)
@@ -274,6 +344,9 @@ class RDWidget(QOpenGLWidget):
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uHazeColor"), 1, haze)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
+        gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
         self._bedrock.draw()
 
         # 4. Infinite sea plane with the hole around the player.
@@ -288,6 +361,9 @@ class RDWidget(QOpenGLWidget):
         gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
         gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
         gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uHazeColor"), 1, haze)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
+        gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
         self._sea.draw()
         gl.glDepthMask(gl.GL_TRUE)
         gl.glDisable(gl.GL_BLEND)
@@ -295,9 +371,10 @@ class RDWidget(QOpenGLWidget):
         self._frame += 1
         if self.on_hud is not None and self._frame % 6 == 0:
             p = cam.position
+            boost = "  x10 BOOST" if self._boost > 1.0 else ""
             self.on_hud(
                 f"pos ({p[0]:7.1f}, {p[1]:6.1f}, {p[2]:7.1f})   "
-                f"speed {cam.move_speed:5.1f} m/s   "
+                f"speed {cam.move_speed * self._boost:5.1f} m/s{boost}   "
                 f"yaw {math.degrees(cam.yaw):6.1f} deg   pitch {math.degrees(cam.pitch):6.1f} deg"
             )
 

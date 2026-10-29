@@ -60,78 +60,33 @@ void main() {
 }
 """
 
-_FILTERED_CHECKER = """
-// Box-filtered checkerboard over the fragment's actual footprint.
-// The checker factors as s(x) * s(y) with s a +-1 square wave, and the
-// box average of a product over a product region is the product of the
-// box averages -- so filter each axis over the footprint's extent in
-// that axis.  The extents come from the screen-space derivatives of
-// the pattern coordinates, i.e. the (anisotropic) footprint itself,
-// approximated by its bounding box.  At grazing angles the across-view
-// cells therefore survive as stripes long after a scalar fwidth fade
-// would have averaged the whole pattern to grey.
-float _tri(float t) { return 1.0 - abs(1.0 - mod(t, 2.0)); }
-float _filteredAxis(float t, float w) {
-    w = max(w, 1e-4);
-    return (_tri(t + 0.5 * w) - _tri(t - 0.5 * w)) / w;
-}
-float filteredChecker(vec2 g) {
-    vec2 dx = dFdx(g);
-    vec2 dy = dFdy(g);
-    // Widths inflated by 1.25: bias the filter toward stability --
-    // the moire band lives where the footprint spans ~1-2 cells, and
-    // a slightly wider box costs little sharpness there.
-    float fx = _filteredAxis(g.x, (abs(dx.x) + abs(dy.x)) * 1.25);
-    float fy = _filteredAxis(g.y, (abs(dx.y) + abs(dy.y)) * 1.25);
-    return 0.5 + 0.5 * fx * fy;
-}
-
-// Grid lines must vanish once their cells go sub-pixel: a line
-// pattern sampled below its own period aliases into moire bands no
-// matter how it is faded by distance, so gate by footprint instead.
-float gridFade(vec2 g) {
-    vec2 fw = fwidth(g);
-    return 1.0 - smoothstep(0.30, 0.60, max(fw.x, fw.y));
-}
-"""
-
-_BEDROCK_FRAG = (
-    """
+_BEDROCK_FRAG = """
 #version 330 core
 in vec4 vHomog;
 uniform vec3 uCamPos;
 uniform vec3 uHazeColor;
+uniform sampler2D uTex;
 out vec4 fragColor;
 
-float gridLine(vec2 g) {
-    vec2 fw = fwidth(g) + vec2(1e-4);
-    vec2 a = abs(fract(g - 0.5) - 0.5) / fw;
-    return 1.0 - min(min(a.x, a.y), 1.0);
-}
-"""
-    + _FILTERED_CHECKER
-    + """
 void main() {
     if (vHomog.w <= 0.0) discard;
     vec3 wp = vHomog.xyz / vHomog.w;
     float dist = length(wp - uCamPos);
 
-    // 8 m checkerboard, footprint-filtered (see filteredChecker); the
-    // pattern is what makes fast flight over the bedrock plane visible.
-    vec2 g8 = wp.xz / 8.0;
-    float check = filteredChecker(g8);
-    vec3 col = mix(vec3(0.30, 0.28, 0.26), vec3(0.56, 0.53, 0.49), check);
-
-    float line1 = gridLine(wp.xz) * gridFade(wp.xz);
-    float line8 = gridLine(g8) * gridFade(g8) * (1.0 - smoothstep(400.0, 3000.0, dist));
-    col = mix(col, vec3(0.16, 0.15, 0.14), line1 * 0.25);
-    col = mix(col, vec3(0.10, 0.10, 0.10), line8 * 0.50);
+    // Pattern from a mipmapped texture (16 m tile: 8 m checkerboard
+    // with 1 m and 8 m grid lines baked in), sampled with explicit
+    // gradients so the hardware's anisotropic filtering integrates
+    // the true elongated footprint at grazing angles.  This replaced
+    // a procedural box filter whose bounding-box footprint washed
+    // the pattern out (and shimmered) at mid distance: with aniso
+    // up to 16x, cells stay readable far further toward the horizon.
+    vec2 uv = wp.xz / 16.0;
+    vec3 col = textureGrad(uTex, uv, dFdx(uv), dFdy(uv)).rgb;
 
     col = mix(col, uHazeColor, smoothstep(800.0, 7000.0, dist));
     fragColor = vec4(col, 1.0);
 }
 """
-)
 
 _SEA_FRAG = (
     """
@@ -140,16 +95,19 @@ in vec4 vHomog;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uHazeColor;
+uniform sampler2D uTex;
 out vec4 fragColor;
 """
-    + _FILTERED_CHECKER
     + """
 void main() {
     if (vHomog.w <= 0.0) discard;
     vec3 wp = vHomog.xyz / vHomog.w;
     float dist = length(wp - uCamPos);
 
-    float check = filteredChecker(wp.xz / 25.0);
+    // The shared pattern texture's alpha holds the bare 2x2 checker
+    // factor; at a 50 m tile that is the sea's 25 m checkerboard.
+    vec2 uv = wp.xz / 50.0;
+    float check = textureGrad(uTex, uv, dFdx(uv), dFdy(uv)).a;
     vec3 col = mix(vec3(0.045, 0.21, 0.37), vec3(0.075, 0.28, 0.45), check * 0.6);
 
     // Sun glitter on a flat sea: Blinn specular against the up normal.
