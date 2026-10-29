@@ -9,7 +9,11 @@
 """
 
 SUN_DIR = (-0.45, 0.62, -0.35)  # static daytime sun (normalised in shader)
-HAZE_COLOR = (0.74, 0.82, 0.90)
+# One horizon colour, shared by everything that reaches the horizon:
+# the sky gradient's horizon value (in SKY_FRAG), the planes' distance
+# haze, and the GL clear colour.  If these disagree, the seam between
+# a hazed-out plane and the sky shows as a grey band at the horizon.
+HAZE_COLOR = (0.78, 0.86, 0.94)
 
 SKY_VERT = """
 #version 330 core
@@ -56,7 +60,32 @@ void main() {
 }
 """
 
-_BEDROCK_FRAG = """
+_FILTERED_CHECKER = """
+// Box-filtered checkerboard over the fragment's actual footprint.
+// The checker factors as s(x) * s(y) with s a +-1 square wave, and the
+// box average of a product over a product region is the product of the
+// box averages -- so filter each axis over the footprint's extent in
+// that axis.  The extents come from the screen-space derivatives of
+// the pattern coordinates, i.e. the (anisotropic) footprint itself,
+// approximated by its bounding box.  At grazing angles the across-view
+// cells therefore survive as stripes long after a scalar fwidth fade
+// would have averaged the whole pattern to grey.
+float _tri(float t) { return 1.0 - abs(1.0 - mod(t, 2.0)); }
+float _filteredAxis(float t, float w) {
+    w = max(w, 1e-4);
+    return (_tri(t + 0.5 * w) - _tri(t - 0.5 * w)) / w;
+}
+float filteredChecker(vec2 g) {
+    vec2 dx = dFdx(g);
+    vec2 dy = dFdy(g);
+    float fx = _filteredAxis(g.x, abs(dx.x) + abs(dy.x));
+    float fy = _filteredAxis(g.y, abs(dx.y) + abs(dy.y));
+    return 0.5 + 0.5 * fx * fy;
+}
+"""
+
+_BEDROCK_FRAG = (
+    """
 #version 330 core
 in vec4 vHomog;
 uniform vec3 uCamPos;
@@ -68,20 +97,18 @@ float gridLine(vec2 g) {
     vec2 a = abs(fract(g - 0.5) - 0.5) / fw;
     return 1.0 - min(min(a.x, a.y), 1.0);
 }
-
+"""
+    + _FILTERED_CHECKER
+    + """
 void main() {
     if (vHomog.w <= 0.0) discard;
     vec3 wp = vHomog.xyz / vHomog.w;
     float dist = length(wp - uCamPos);
 
-    // 8 m checkerboard, contrast faded as cells shrink below a pixel
-    // so it settles to its average instead of shimmering; the pattern
-    // is what makes fast flight over the bedrock plane visible.
+    // 8 m checkerboard, footprint-filtered (see filteredChecker); the
+    // pattern is what makes fast flight over the bedrock plane visible.
     vec2 g8 = wp.xz / 8.0;
-    vec2 fw = fwidth(g8) + vec2(1e-4);
-    float aa = clamp(max(fw.x, fw.y), 0.0, 1.0);
-    float check = mod(floor(g8.x) + floor(g8.y), 2.0);
-    check = mix(check, 0.5, aa);
+    float check = filteredChecker(g8);
     vec3 col = mix(vec3(0.30, 0.28, 0.26), vec3(0.56, 0.53, 0.49), check);
 
     float line1 = gridLine(wp.xz) * (1.0 - smoothstep(60.0, 500.0, dist));
@@ -93,22 +120,25 @@ void main() {
     fragColor = vec4(col, 1.0);
 }
 """
+)
 
-_SEA_FRAG = """
+_SEA_FRAG = (
+    """
 #version 330 core
 in vec4 vHomog;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uHazeColor;
 out vec4 fragColor;
-
+"""
+    + _FILTERED_CHECKER
+    + """
 void main() {
     if (vHomog.w <= 0.0) discard;
     vec3 wp = vHomog.xyz / vHomog.w;
     float dist = length(wp - uCamPos);
 
-    vec2 g = wp.xz / 25.0;
-    float check = mod(floor(g.x) + floor(g.y), 2.0);
+    float check = filteredChecker(wp.xz / 25.0);
     vec3 col = mix(vec3(0.045, 0.21, 0.37), vec3(0.075, 0.28, 0.45), check * 0.6);
 
     // Sun glitter on a flat sea: Blinn specular against the up normal.
@@ -123,20 +153,23 @@ void main() {
     fragColor = vec4(col, 0.86);
 }
 """
+)
 
 PLANE_FRAGS = {"bedrock": _BEDROCK_FRAG, "sea": _SEA_FRAG}
 
 BLOCK_VERT = """
 #version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec3 aColor;
+layout(location = 1) in vec3 aNormalFlat;
+layout(location = 2) in vec3 aNormalSmooth;
+layout(location = 3) in vec3 aColor;
 uniform mat4 uVP;
+uniform float uSmooth;
 out vec3 vNormal;
 out vec3 vColor;
 out vec3 vWorld;
 void main() {
-    vNormal = aNormal;
+    vNormal = mix(aNormalFlat, aNormalSmooth, uSmooth);
     vColor = aColor;
     vWorld = aPos;
     gl_Position = uVP * vec4(aPos, 1.0);

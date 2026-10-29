@@ -183,8 +183,7 @@ class GroundPatch:
 
     Centres sit at j = 0 with i, k in [-half, +half] and i + k even
     (the parity invariant with j = 0).  The layer's peaks reach y = +s
-    and its bottom points touch y = -s, which is exactly where the
-    bedrock plane lives.
+    and its bottom points reach y = -s.
     """
 
     def __init__(self, half: int = 15, s: float = DEFAULT_S):
@@ -197,18 +196,38 @@ class GroundPatch:
         ]
 
     def build_mesh(self):
-        """Merged static mesh: interleaved (position, normal, color)."""
+        """Merged static mesh.
+
+        Interleaved per vertex: position, flat (per-face) normal,
+        smooth (Gouraud) normal, color -- 12 floats.  The smooth
+        normal at a surface point is the normalised sum of the flat
+        normals of every face meeting there, across the whole patch;
+        faces shared between two cells are interior, come in opposite
+        pairs, and cancel out of the sum by themselves.
+        """
         pos, nrm, idx = cell_mesh(self.s)
-        verts_out: list[np.ndarray] = []
-        idx_out: list[int] = []
+        # First pass: world positions and flat normals.
+        placed: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
         for coord in self.cells:
             origin = coord.to_world(self.s)
-            base = len(verts_out)
             for n in range(len(pos)):
-                color = _face_color(nrm[n], coord)
-                verts_out.append(
-                    np.concatenate([pos[n] + origin, nrm[n], color])
-                )
+                placed.append((pos[n] + origin, nrm[n], _face_color(nrm[n], coord)))
+        # Smooth normals: group vertices by world position.
+        sums: dict[tuple[float, float, float], np.ndarray] = {}
+        for p, n, _ in placed:
+            key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
+            sums[key] = sums.get(key, np.zeros(3)) + n
+        verts_out: list[np.ndarray] = []
+        idx_out: list[int] = []
+        for cell_no, coord in enumerate(self.cells):
+            base = cell_no * len(pos)
+            for n in range(len(pos)):
+                p, nrm_flat, color = placed[base + n]
+                key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
+                smooth = sums[key]
+                norm = np.linalg.norm(smooth)
+                smooth = smooth / norm if norm > 0 else nrm_flat
+                verts_out.append(np.concatenate([p, nrm_flat, smooth, color]))
             idx_out.extend(base + int(t) for t in idx)
         return (
             np.array(verts_out, dtype=np.float32),
