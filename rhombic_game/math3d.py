@@ -70,65 +70,58 @@ def drag_glue(
 ) -> None:
     """Rotate the camera so the grabbed world direction stays grabbed.
 
-    The target is the world direction under the cursor at drag start
-    (ndc_old), computed ONCE, in world space.
+    Closed form, no iteration.  Write the new cursor ray in camera
+    space as v = (ndc.x * tan(fovx/2), ndc.y * tan(fovy/2), -1); the
+    camera must satisfy Ry(yaw') Rx(pitch') v = |v| * target.
 
-    Two stages: a Rodrigues rotation carrying the current cursor ray
-    onto the target, applied to the forward vector, gives a yaw/pitch
-    within ~a degree (a yaw/pitch camera cannot realise an arbitrary
-    rotation exactly -- it discards the roll about the forward axis);
-    then Newton iterations on (yaw, pitch) drive the cursor ray onto
-    the target to machine precision.
+    - Rx preserves the x component, so with w = Ry(-yaw') target we
+      need w.x = v.x / |v|.  w.x as a function of yaw' is a sinusoid
+      of amplitude rho = the target's horizontal magnitude, giving
+      yaw' = delta +/- acos(vx_hat / rho); of the two solutions, take
+      the one nearer the current (yaw, pitch).
+    - Then pitch' rotates v's (y, z) components onto w's: pitch' is
+      the difference of their atan2 angles.
 
-    An earlier version recomputed the target from ndc_old after
-    rotating -- re-aiming at a moving target, which applied the step
-    twice and made the world drag ~2x faster than the mouse.
+    Exact (to ~1e-6 degrees, stress-tested) whenever a solution
+    exists.  The one impossible geometry for a yaw/pitch camera: a
+    near-vertical target (|vx_hat| > rho -- looking almost straight
+    up or down with the cursor off to the side) would need roll;
+    there the acos clamps and the formula returns the closest yaw.
+
+    History: v1 recomputed the target after rotating (applied the
+    step twice, ~2x drag); v2 fixed that but refined with Newton
+    iterations; this closed form replaces the loop.
     """
     inv = np.linalg.inv(camera.view_projection(fov_y_rad, aspect, near))
     target = ray_direction(inv, *ndc_old)
-
-    def current_ray() -> np.ndarray:
-        inv_now = np.linalg.inv(camera.view_projection(fov_y_rad, aspect, near))
-        return ray_direction(inv_now, *ndc_new)
-
-    # Stage 1: Rodrigues initial guess.
-    a = current_ray()
-    axis = np.cross(a, target)
-    s = float(np.linalg.norm(axis))
-    if s > 1e-12:
-        axis = axis / s
-        c = float(np.clip(a @ target, -1.0, 1.0))
-        f = camera.forward()
-        f2 = f * c + np.cross(axis, f) * s + axis * float(axis @ f) * (1.0 - c)
-        camera.yaw = float(np.arctan2(-f2[0], -f2[2]))
-        camera.pitch = float(
-            np.clip(np.arcsin(np.clip(f2[1], -1.0, 1.0)), -1.55, 1.55)
+    ty = math.tan(fov_y_rad / 2.0)
+    v = np.array([ndc_new[0] * ty * aspect, ndc_new[1] * ty, -1.0])
+    vx_hat = float(v[0] / np.linalg.norm(v))
+    dx, dz = float(target[0]), float(target[2])
+    rho = math.hypot(dx, dz)
+    solutions: list[tuple[float, float]] = []
+    if rho < 1e-9:
+        yaws = [camera.yaw]
+    else:
+        delta = math.atan2(-dz, dx)
+        off = math.acos(max(-1.0, min(1.0, vx_hat / rho)))
+        yaws = [delta + off, delta - off]
+    for yaw_new in yaws:
+        cy, sy = math.cos(yaw_new), math.sin(yaw_new)
+        w = np.array(
+            [cy * dx - sy * dz, float(target[1]), sy * dx + cy * dz]
         )
+        pitch_new = math.atan2(float(w[2]), float(w[1])) - math.atan2(-1.0, float(v[1]))
+        pitch_new = (pitch_new + math.pi) % (2.0 * math.pi) - math.pi
+        solutions.append((yaw_new, pitch_new))
 
-    # Stage 2: Newton refinement on (yaw, pitch).
-    seed = np.array([1.0, 0.0, 0.0]) if abs(target[0]) < 0.9 else np.array([0.0, 0.0, 1.0])
-    e1 = np.cross(target, seed)
-    e1 = e1 / np.linalg.norm(e1)
-    e2 = np.cross(target, e1)
-    eps = 1e-6
-    for _ in range(6):
-        r = current_ray()
-        if float(r @ target) > 1.0 - 1e-14:
-            break
-        res = np.array([(r - target) @ e1, (r - target) @ e2])
-        jac = np.zeros((2, 2))
-        for col, attr in enumerate(("yaw", "pitch")):
-            saved = getattr(camera, attr)
-            setattr(camera, attr, saved + eps)
-            rp = current_ray()
-            setattr(camera, attr, saved)
-            jac[:, col] = np.array([(rp - r) @ e1, (rp - r) @ e2]) / eps
-        try:
-            delta = np.linalg.solve(jac, -res)
-        except np.linalg.LinAlgError:
-            break
-        camera.yaw += float(delta[0])
-        camera.pitch = float(np.clip(camera.pitch + float(delta[1]), -1.55, 1.55))
+    def _dist(sol: tuple[float, float]) -> float:
+        dyaw = (sol[0] - camera.yaw + math.pi) % (2.0 * math.pi) - math.pi
+        return abs(dyaw) + abs(sol[1] - camera.pitch)
+
+    yaw_new, pitch_new = min(solutions, key=_dist)
+    camera.yaw = float(yaw_new)
+    camera.pitch = float(np.clip(pitch_new, -1.55, 1.55))
 
 
 def rotation_yaw_pitch(yaw: float, pitch: float) -> np.ndarray:

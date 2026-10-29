@@ -57,10 +57,13 @@ rotation that carries the direction under the cursor onto the
 direction previously under it, so an object at infinity stays glued
 to the pointer at any screen position (no fixed radians-per-pixel
 rate — the same drag travels further at wide FOV edges than at the
-centre, as it should). The solve keeps the grabbed direction fixed
-in world space and refines yaw/pitch by Newton iterations; an
-earlier version re-aimed at a moving target each pass and applied
-the step twice, dragging ~2x too fast.
+centre, as it should). The solve is a closed form (an acos for
+yaw, an atan2 difference for pitch; see `drag_glue` in
+`math3d.py`), exact whenever a yaw/pitch camera can glue the point
+at all -- the one impossible geometry is a near-vertical target
+with the cursor off to the side, which would need roll. Earlier
+versions re-aimed at a moving target (dragging ~2x too fast), then
+refined with Newton iterations; the formula replaces the loop.
 
 Running from an IDE: the canonical entry is `python -m rhombic_game`
 from the project root. To run a file directly (e.g. PyCharm's Run
@@ -154,19 +157,24 @@ but with the real nouns in place:
   tops each cell at 0.866 m instead of 1.0 m, in a threefold pattern.
   It sits 75 m ahead of the first patch so the two surfaces can be
   compared in one flight.
-- One **wall segment** stands on each patch (~4 courses high, ~5
+- **Wall segments** stand on both patches (~4 courses high, ~5
   blocks long: `wall_cells_100`, `wall_cells_111`), for judging
-  vertical surfaces in both cleavages. Stacking is staggered by the
-  lattice in both frames -- in {111} each course also shifts
-  sideways as it nestles into the hollows below.
+  vertical surfaces in both cleavages. In {111} the course offsets
+  cycle through the three nestling directions, so the wall zigzags
+  by at most ~0.82 m but rises straight on average. The {111} patch
+  also has a second wall (`wall_cells_111_b`) adjoining the first
+  at 90 degrees: the plane's lattice directions only meet at
+  60/120 degrees, so the 90-degree wall staircases along (1,1,-2),
+  alternating (1,0,-1) and (0,1,-1) steps about the true line
+  (see `docs/walls-111-corner.png`).
 
-Face colours depend on orientation class only -- no per-cell
-variation. (A per-cell hash tint once shipped here; it made
-corresponding faces of neighbouring blocks differ, visible as
-stripes and as seams along the patch's symmetry axes, in flat and
-Gouraud shading alike. The Gouraud normals themselves were checked
-numerically: at interior top vertices they are exactly vertical,
-as symmetry suggests.)
+Face colours are a base per orientation class times a per-cell
+tint of +/-3%. (The tint's first version used a structured hash at
++/-10%: its low bits mirrored along the patch's symmetry axes and
+printed stripes and quadrant seams onto the terrain. The current
+splitmix-style hash is decorrelated, and the amplitude is subtle.
+The Gouraud normals were checked numerically: at interior top
+vertices they are exactly vertical, as symmetry suggests.)
 
 Orientation choice, made once here: a 4-valent (axis) vertex points
 straight up, so the layer's top is peaks at y = +1 m over the centres

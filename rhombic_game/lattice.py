@@ -162,22 +162,34 @@ def cell_mesh(s: float = DEFAULT_S):
     )
 
 
-def _face_color(normal: np.ndarray, coord: FccCoord) -> np.ndarray:
-    """Face colour by orientation class only.
+def _tint(coord: FccCoord) -> float:
+    """Per-cell brightness variation, +/-3%.
 
-    Deliberately NOT varied per cell: an earlier version multiplied
-    in a per-cell hash tint, which made corresponding faces of
-    neighbouring blocks differ -- visible as stripes and as seams
-    along the patch's symmetry axes (the hash's low bits mirror at
-    i = 0 / k = 0).  Uniformity is the correct look here: every face
-    with the same orientation gets the same colour.
+    A splitmix-style integer hash: multiply-xorshift mixing decorre-
+    lates the low bits, unlike the earlier structured hash whose low
+    bits mirrored at i = 0 / k = 0 and printed quadrant seams and
+    stripes onto the terrain (at +/-10%, also too strong).  This one
+    is deliberately subtle -- texture, not pattern.
     """
+    h = ((coord.i & 0xFFFFFFFF) * 0x9E3779B1) & 0xFFFFFFFF
+    h ^= ((coord.j & 0xFFFFFFFF) * 0x85EBCA6B) & 0xFFFFFFFF
+    h ^= ((coord.k & 0xFFFFFFFF) * 0xC2B2AE35) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0x27D4EB2F) & 0xFFFFFFFF
+    h ^= h >> 15
+    return 0.97 + 0.06 * ((h & 0xFFFF) / 0xFFFF)
+
+
+def _face_color(normal: np.ndarray, coord: FccCoord) -> np.ndarray:
+    """Face colour: base by orientation class, times the cell tint."""
     ny = float(normal[1])
     if ny > 0.35:
-        return np.array([0.36, 0.60, 0.27])  # grassy upper rhombi
-    if ny < -0.35:
-        return np.array([0.23, 0.18, 0.14])  # shadowed underside
-    return np.array([0.52, 0.40, 0.29])  # earthy sides
+        base = np.array([0.36, 0.60, 0.27])  # grassy upper rhombi
+    elif ny < -0.35:
+        base = np.array([0.23, 0.18, 0.14])  # shadowed underside
+    else:
+        base = np.array([0.52, 0.40, 0.29])  # earthy sides
+    return base * _tint(coord)
 
 
 def rotation_y_to(direction) -> np.ndarray:
@@ -345,15 +357,57 @@ def wall_cells_100() -> list[FccCoord]:
     ]
 
 
+# Course offsets for stacking along (1, 1, 1): the steps cycle
+# (1,1,0) -> (1,0,1) -> (0,1,1), the three nestling directions.
+# After three courses the cumulative offset is (2,2,2) -- pure
+# (1,1,1), zero sideways shift -- so the wall zigzags by at most
+# ~0.82 m but rises straight on average instead of leaning forever.
+_COURSE_STEPS = [(1, 1, 0), (1, 0, 1), (0, 1, 1)]
+
+
+def _course_offset(course: int) -> tuple[int, int, int]:
+    x = y = z = 0
+    for c in range(course):
+        sx, sy, sz = _COURSE_STEPS[c % 3]
+        x, y, z = x + sx, y + sy, z + sz
+    return x, y, z
+
+
 def wall_cells_111() -> list[FccCoord]:
     """Wall segment for the {111} patch: 4 courses, 5 cells per course.
 
-    Stacking along (1, 1, 1): course c lives in the layer i+j+k = 2c
-    and is shifted by (c, c, 0) against the base row -- each course
-    nestles into the hollows of the one below, which is simply what
-    FCC stacking along [111] is.  Course 0 would duplicate patch
-    cells, so courses run 1..4 on top of the patch.
+    Course c lives in the layer i+j+k = 2c, shifted by the cycling
+    course offset (see _COURSE_STEPS).  Course 0 would duplicate
+    patch cells, so courses run 1..4 on top of the patch.
     """
-    return [
-        FccCoord(m + c, c - m, 0) for c in range(1, 5) for m in range(5)
-    ]
+    cells = []
+    for c in range(1, 5):
+        ox, oy, oz = _course_offset(c)
+        cells += [FccCoord(m + ox, -m + oy, oz) for m in range(5)]
+    return cells
+
+
+def wall_cells_111_b() -> list[FccCoord]:
+    """Second {111} wall, adjoining the first at 90 degrees.
+
+    The {111} plane's lattice directions meet at 60/120 degrees, so
+    no lattice row runs at 90 degrees to wall A's (1,-1,0).  This
+    wall follows the (1,1,-2) direction -- exactly perpendicular to
+    (1,-1,0) within the plane -- by staircasing: steps alternate
+    (1,0,-1) and (0,1,-1), each a nearest-neighbour step, zigzagging
+    about the 90-degree line with ~0.71 m amplitude.  Same cycling
+    course offsets as wall A, so it also rises straight on average.
+    It starts from wall A's corner cell and runs ~10 m.
+    """
+    base = [(0, 0, 0)]
+    steps = [(1, 0, -1), (0, 1, -1)]
+    for n in range(8):
+        sx, sy, sz = steps[n % 2]
+        px, py, pz = base[-1]
+        base.append((px + sx, py + sy, pz + sz))
+    cells = []
+    for c in range(1, 5):
+        ox, oy, oz = _course_offset(c)
+        for px, py, pz in base[1:]:
+            cells.append(FccCoord(px + ox, py + oy, pz + oz))
+    return cells

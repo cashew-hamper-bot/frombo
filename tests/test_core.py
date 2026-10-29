@@ -250,7 +250,15 @@ class ShadingUniformityTests(unittest.TestCase):
         verts, _ = patch.build_mesh()
         upper = verts[verts[:, 4] > 0.35]  # flat normal ny
         colors = {tuple(np.round(row[9:12], 6)) for row in upper}
-        self.assertEqual(len(colors), 1, f"upper-face colors differ: {colors}")
+        # The per-cell tint may vary colours, but only within +/-3%
+        # of the orientation class base (0.36, 0.60, 0.27), and it
+        # must actually vary (decorrelated hash, many distinct values).
+        self.assertGreater(len(colors), 50)
+        base = np.array([0.36, 0.60, 0.27])
+        for color in colors:
+            ratio = np.array(color) / base
+            self.assertTrue(np.all(ratio > 0.965) and np.all(ratio < 1.035),
+                            f"upper-face color out of tint bounds: {color}")
         cx, cz = center_xz
         top = verts[
             (np.abs(verts[:, 0] - cx) < 10)
@@ -287,6 +295,50 @@ class WallTests(unittest.TestCase):
         expected = [round(2 * course / math.sqrt(3.0), 4) for course in range(1, 5)]
         self.assertEqual(heights, expected)
 
+    def test_wall_111_rises_straight_on_average(self):
+        # After 3 courses the cumulative offset is (2,2,2): zero
+        # sideways shift.  Check course centroids' sideways drift
+        # from the wall's base line stays under 1 m for all courses.
+        from rhombic_game.lattice import PATCH111_ROTATION, wall_cells_111
+
+        cells = wall_cells_111()
+        rows: dict[int, list] = {}
+        for c in cells:
+            rows.setdefault(c.i + c.j + c.k, []).append(
+                PATCH111_ROTATION @ c.to_world(1.0)
+            )
+        base_line = np.mean(
+            [PATCH111_ROTATION @ np.array([m, -m, 0.0]) for m in range(5)],
+            axis=0,
+        )
+        for pts in rows.values():
+            centroid = np.mean(pts, axis=0)
+            # Sideways = horizontal (world XZ) part, since the
+            # rotation carries lattice (1,1,1) onto world +Y.
+            drift = (centroid - base_line) * np.array([1.0, 0.0, 1.0])
+            self.assertLess(float(np.linalg.norm(drift)), 1.0)
+
+    def test_wall_111_b_staircases_at_90_degrees(self):
+        from rhombic_game.lattice import _course_offset, wall_cells_111_b
+
+        cells = wall_cells_111_b()
+        self.assertEqual(len(cells), 32)
+        self.assertEqual(
+            sorted({c.i + c.j + c.k for c in cells}), [2, 4, 6, 8]
+        )
+        # Course-1 cells minus the course offset are the staircase
+        # base points; each stays within ~0.71 m of the (1,1,-2)
+        # line through the corner (the exact 90-degree direction).
+        o1 = np.array(_course_offset(1), dtype=float)
+        u = np.array([1.0, 1.0, -2.0]) / math.sqrt(6.0)
+        base = [c for c in cells if c.i + c.j + c.k == 2]
+        self.assertEqual(len(base), 8)
+        for c in base:
+            q = np.array([c.i, c.j, c.k], dtype=float) - o1
+            self.assertAlmostEqual(float(q.sum()), 0.0)  # in the layer plane
+            dist = float(np.linalg.norm(q - (q @ u) * u))
+            self.assertLessEqual(dist, 0.72)
+
 
 class DragGlueTests(unittest.TestCase):
     def test_grabbed_direction_stays_under_cursor(self):
@@ -299,3 +351,20 @@ class DragGlueTests(unittest.TestCase):
         drag_glue(cam, fov, aspect, near, ndc_old, ndc_new)
         inv2 = np.linalg.inv(cam.view_projection(fov, aspect, near))
         np.testing.assert_allclose(ray_direction(inv2, *ndc_new), target, atol=1e-6)
+
+    def test_near_nadir_degrades_gracefully(self):
+        # Looking almost straight down with the cursor off to the
+        # side is the one geometry a yaw/pitch camera cannot glue
+        # exactly (it would need roll).  The closed form must still
+        # land within a couple of degrees, not diverge.
+        cam = Camera()
+        cam.yaw, cam.pitch = 0.3, -1.50
+        fov, aspect, near = 1.1, 1.6, 0.1
+        ndc_old, ndc_new = (0.0, -0.2), (0.08, -0.2)  # one realistic step
+        inv = np.linalg.inv(cam.view_projection(fov, aspect, near))
+        target = ray_direction(inv, *ndc_old)
+        drag_glue(cam, fov, aspect, near, ndc_old, ndc_new)
+        inv2 = np.linalg.inv(cam.view_projection(fov, aspect, near))
+        got = ray_direction(inv2, *ndc_new)
+        err_deg = math.degrees(math.acos(float(np.clip(got @ target, -1, 1))))
+        self.assertLess(err_deg, 3.0)

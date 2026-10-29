@@ -40,6 +40,7 @@ from .lattice import (
     build_cells_mesh,
     wall_cells_100,
     wall_cells_111,
+    wall_cells_111_b,
 )
 from .math3d import Camera, drag_glue
 
@@ -149,6 +150,11 @@ class RDWidget(QOpenGLWidget):
             self._vao_from_mesh(
                 *build_cells_mesh(
                     wall_cells_111(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
+                )
+            ),
+            self._vao_from_mesh(
+                *build_cells_mesh(
+                    wall_cells_111_b(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
                 )
             ),
         ]
