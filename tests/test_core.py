@@ -368,3 +368,36 @@ class DragGlueTests(unittest.TestCase):
         got = ray_direction(inv2, *ndc_new)
         err_deg = math.degrees(math.acos(float(np.clip(got @ target, -1, 1))))
         self.assertLess(err_deg, 3.0)
+
+
+class Wall100BAndColumnTests(unittest.TestCase):
+    def test_wall_100_b(self):
+        from rhombic_game.lattice import wall_cells_100_b
+
+        cells = wall_cells_100_b()
+        self.assertEqual(len(cells), 22)
+        self.assertTrue(all(c.i == 5 and 1 <= c.j <= 4 for c in cells))
+
+    def test_column_100(self):
+        from rhombic_game.lattice import NEIGHBOR_OFFSETS, column_cells_100
+
+        cells = column_cells_100()
+        self.assertEqual(len(cells), 8)
+        prev = (10, 0, 10)
+        for c in cells:
+            step = (c.i - prev[0], c.j - prev[1], c.k - prev[2])
+            self.assertIn(step, NEIGHBOR_OFFSETS)  # face-bonded courses
+            prev = (c.i, c.j, c.k)
+        self.assertEqual((cells[-1].i, cells[-1].k), (10, 10))  # wobble cancels
+
+    def test_column_111(self):
+        from rhombic_game.lattice import PATCH111_ROTATION, column_cells_111
+
+        cells = column_cells_111()
+        self.assertEqual(len(cells), 8)
+        base = PATCH111_ROTATION @ np.array([-6.0, 3.0, 3.0])
+        for n, c in enumerate(cells, start=1):
+            p = PATCH111_ROTATION @ c.to_world(1.0)
+            self.assertAlmostEqual(float(p[1]), 2 * n / math.sqrt(3.0), places=4)
+            drift = (p - base) * np.array([1.0, 0.0, 1.0])
+            self.assertLessEqual(float(np.linalg.norm(drift)), 0.83)
