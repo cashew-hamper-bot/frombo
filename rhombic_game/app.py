@@ -25,7 +25,7 @@ import sys
 
 import numpy as np
 from OpenGL import GL as gl
-from PySide6.QtCore import QElapsedTimer, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer
 from PySide6.QtGui import QCursor, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
@@ -105,7 +105,8 @@ class RDWidget(QOpenGLWidget):
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._captured = False  # Minecraft-like mouse capture (FPS look)
-        self._skip_move = False  # swallow the recenter synthetic move
+        self._last_global = None  # last pointer global pos (capture)
+        self._look_pending = [0.0, 0.0]  # captured deltas awaiting a frame
         self._press_pos = None  # for click-vs-drag detection
         self._keys: set[int] = set()
         self._last_mouse = None
@@ -363,8 +364,28 @@ class RDWidget(QOpenGLWidget):
         if np.any(move):
             cam.position = cam.position + move * (cam.move_speed * self._boost * dt)
 
+    def _apply_pending_look(self) -> None:
+        """Apply the frame's accumulated captured-mouse rotation.
+
+        Same angular scale as grab-the-world drag at the screen
+        centre, FPS sense -- but integrated once per frame, like
+        WASD translation, instead of per mouse event.
+        """
+        dx, dy = self._look_pending
+        if dx == 0.0 and dy == 0.0:
+            return
+        self._look_pending = [0.0, 0.0]
+        w = max(1.0, float(self.width()))
+        h = max(1.0, float(self.height()))
+        tan_y = math.tan(FOV_Y / 2.0)
+        self.camera.yaw -= dx * (2.0 * tan_y * (w / h) / w)
+        self.camera.pitch = float(
+            np.clip(self.camera.pitch - dy * (2.0 * tan_y / h), -1.55, 1.55)
+        )
+
     def paintGL(self) -> None:
         dt = min(self._clock.restart() / 1000.0, 0.05)
+        self._apply_pending_look()
         self._move(dt)
         cam = self.camera
         dpr = self.devicePixelRatioF()
@@ -372,14 +393,9 @@ class RDWidget(QOpenGLWidget):
         gl.glViewport(0, 0, w, h)
         vp = cam.view_projection(FOV_Y, w / h, NEAR).astype(np.float32)
         sun = _sun()
-        haze = np.array(shaders.HAZE_COLOR, dtype=np.float32)
-        # Below the bedrock the whole atmosphere turns nether-red:
-        # the haze colour (shared by sky horizon, blocks and planes)
-        # mixes toward the nether horizon colour.
+        # Below bedrock the sky palette turns nether-red (the sky
+        # shader's uUnder fade).  There is no haze anywhere to tint.
         under = float(np.clip((planes.BEDROCK_Y - cam.position[1]) / 12.0, 0.0, 1.0))
-        if under > 0.0:
-            nether_haze = np.array([0.40, 0.11, 0.04], dtype=np.float32)
-            haze = (haze * (1.0 - under) + nether_haze * under).astype(np.float32)
         cam_pos = cam.position.astype(np.float32)
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
@@ -406,7 +422,6 @@ class RDWidget(QOpenGLWidget):
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uHazeColor"), 1, haze)
         for vao, count in self._patches:
             gl.glBindVertexArray(vao)
             gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
@@ -425,7 +440,6 @@ class RDWidget(QOpenGLWidget):
         gl.glUseProgram(self._bedrock_prog)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uHazeColor"), 1, haze)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
         gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
@@ -446,7 +460,6 @@ class RDWidget(QOpenGLWidget):
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
         gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uHazeColor"), 1, haze)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
         gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
@@ -498,11 +511,13 @@ class RDWidget(QOpenGLWidget):
             self.grabMouse()
             self.setCursor(Qt.CursorShape.BlankCursor)
             center = self.mapToGlobal(self.rect().center())
-            self._skip_move = True
+            self._last_global = QPointF(center)
+            self._look_pending = [0.0, 0.0]
             QCursor.setPos(center)
         else:
             self.releaseMouse()
             self.unsetCursor()
+            self._last_global = None
 
     def mousePressEvent(self, event) -> None:
         if self._captured:
@@ -538,28 +553,26 @@ class RDWidget(QOpenGLWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self._captured:
-            if self._skip_move:
-                self._skip_move = False
-                super().mouseMoveEvent(event)
-                return
-            center = self.mapToGlobal(self.rect().center())
-            delta = event.globalPosition() - center
-            if delta.x() != 0.0 or delta.y() != 0.0:
-                # Same angular scale as grab-the-world drag at the
-                # screen centre, FPS sense (Minecraft-like).
-                w = max(1.0, float(self.width()))
-                h = max(1.0, float(self.height()))
-                tan_y = math.tan(FOV_Y / 2.0)
-                self.camera.yaw -= float(delta.x()) * (2.0 * tan_y * (w / h) / w)
-                self.camera.pitch = float(
-                    np.clip(
-                        self.camera.pitch - float(delta.y()) * (2.0 * tan_y / h),
-                        -1.55,
-                        1.55,
-                    )
-                )
-                self._skip_move = True
-                QCursor.setPos(center)
+            # Accumulate deltas; the rotation is applied once per
+            # frame in the tick, exactly like WASD translation --
+            # applying per-event made the view step at the mouse's
+            # event rate and fought the cursor-recentering warps.
+            # Deltas are measured against the last known global
+            # position (not an assumed centre), so a warp event that
+            # arrives merged with real motion is still measured
+            # correctly, and the warp's own event measures ~zero.
+            pos = event.globalPosition()
+            if self._last_global is not None:
+                d = pos - self._last_global
+                self._look_pending[0] += float(d.x())
+                self._look_pending[1] += float(d.y())
+            center_q = self.mapToGlobal(self.rect().center())
+            center = QPointF(center_q)
+            if pos != center:
+                QCursor.setPos(center_q)
+                self._last_global = center
+            else:
+                self._last_global = pos
             super().mouseMoveEvent(event)
             return
         if self._last_mouse is not None and (
