@@ -35,6 +35,7 @@ def main() -> int:
     fmt.setVersion(3, 3)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
+    fmt.setSamples(4)  # match the app's MSAA, so renders judge aliasing fairly
     QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)
