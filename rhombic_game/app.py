@@ -97,6 +97,10 @@ class RDWidget(QOpenGLWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Mouse tracking ON: without it, Qt only delivers move events
+        # while a button is held -- which silently starved the
+        # mouse-capture look (no button is held in capture mode).
+        self.setMouseTracking(True)
         self.camera = Camera()
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
@@ -191,8 +195,8 @@ class RDWidget(QOpenGLWidget):
         grouped into big hexagons whose centre spacing is 7 small
         spacings -- 49 small hexes by area; a count of the lattice
         gives 50 small centres per big hex, ~38 fully inside and 12
-        exactly bisected by the parent edge.  Alpha holds the bare
-        2x2 checker factor for the sea.  Hexagonal tilings have no
+        exactly bisected by the parent edge.  Alpha holds the same
+        hexagons as a shade factor -- the sea's pattern.  Hexagonal tilings have no
         square period, hence the rectangular tile; its edges were
         verified to match exactly.
         """
@@ -232,7 +236,8 @@ class RDWidget(QOpenGLWidget):
         palette = np.array(
             [[0.44, 0.42, 0.40], [0.50, 0.48, 0.45], [0.39, 0.37, 0.35]]
         )
-        rgb = palette[(qi - ri).astype(int) % 3]
+        c3 = (qi - ri).astype(int) % 3
+        rgb = palette[c3]
         hsh = ((qi.astype(np.int64) * 73856093) ^ (ri.astype(np.int64) * 19349663)) & 0xFFFF
         rgb = rgb * (0.94 + 0.12 * (hsh / 0xFFFF))[..., None]
         edge = np.clip((sdf_s + 0.14) / 0.14, 0.0, 1.0)
@@ -244,7 +249,10 @@ class RDWidget(QOpenGLWidget):
         sdf_b = hex_sdf(x - bcx, z - bcz, 7.0 * sq3 * a_hex / 2.0)
         bedge = np.clip((sdf_b + 0.45) / 0.45, 0.0, 1.0)
         rgb = rgb * (1 - bedge[..., None] * 0.62) + np.array([0.13, 0.12, 0.11]) * (bedge[..., None] * 0.62)
-        alpha = ((np.floor(2 * x / tile_x) + np.floor(2 * z / tile_z)) % 2)
+        # Alpha is the SEA's hex factor: same hexagons, as a shade
+        # value (3-colour step + per-hex jitter, edges darkened).
+        alpha = 0.30 + 0.22 * c3 + (hsh / 0xFFFF - 0.5) * 0.10
+        alpha = alpha * (1 - edge * 0.35) * (1 - bedge * 0.25)
         rgba = np.concatenate([rgb, alpha[..., None]], axis=2)
         return cls._upload_texture(rgba)
 
@@ -365,6 +373,13 @@ class RDWidget(QOpenGLWidget):
         vp = cam.view_projection(FOV_Y, w / h, NEAR).astype(np.float32)
         sun = _sun()
         haze = np.array(shaders.HAZE_COLOR, dtype=np.float32)
+        # Below the bedrock the whole atmosphere turns nether-red:
+        # the haze colour (shared by sky horizon, blocks and planes)
+        # mixes toward the nether horizon colour.
+        under = float(np.clip((planes.BEDROCK_Y - cam.position[1]) / 12.0, 0.0, 1.0))
+        if under > 0.0:
+            nether_haze = np.array([0.40, 0.11, 0.04], dtype=np.float32)
+            haze = (haze * (1.0 - under) + nether_haze * under).astype(np.float32)
         cam_pos = cam.position.astype(np.float32)
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
@@ -376,6 +391,9 @@ class RDWidget(QOpenGLWidget):
         gl.glUseProgram(self._sky_prog)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sky_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._sky_prog, "uSunDir"), 1, sun)
+        # (The matching `under` factor is computed with the haze
+        # colour above; the sky palette fades over the same range.)
+        gl.glUniform1f(gl.glGetUniformLocation(self._sky_prog, "uUnder"), under)
         gl.glBindVertexArray(self._sky_vao)
         gl.glDrawElements(gl.GL_TRIANGLES, self._sky_count, gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
