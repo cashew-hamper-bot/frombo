@@ -180,16 +180,17 @@ def _tint(coord: FccCoord) -> float:
     return 0.97 + 0.06 * ((h & 0xFFFF) / 0xFFFF)
 
 
+SANDY = np.array([0.76, 0.65, 0.46])
+
+
 def _face_color(normal: np.ndarray, coord: FccCoord) -> np.ndarray:
-    """Face colour: base by orientation class, times the cell tint."""
-    ny = float(normal[1])
-    if ny > 0.35:
-        base = np.array([0.36, 0.60, 0.27])  # grassy upper rhombi
-    elif ny < -0.35:
-        base = np.array([0.23, 0.18, 0.14])  # shadowed underside
-    else:
-        base = np.array([0.52, 0.40, 0.29])  # earthy sides
-    return base * _tint(coord)
+    """One sandy colour all around, times the per-cell tint.
+
+    Orientation-class colours (grass/dirt) are gone for now: a
+    single colour makes the poles, walls and lighting easier to
+    reason about while the lattice vocabulary is still forming.
+    """
+    return SANDY * _tint(coord)
 
 
 def rotation_y_to(direction) -> np.ndarray:
@@ -252,28 +253,73 @@ def build_cells_mesh(cells, s: float, rotation: np.ndarray, offset) -> tuple:
     """Merge a set of cells into one static mesh.
 
     Interleaved per vertex: position, flat (per-face) normal, smooth
-    (Gouraud) normal, color -- 12 floats.  The smooth normal at a
-    surface point is the normalised sum of the flat normals of every
-    face meeting there, across the whole set; faces shared between
-    two cells are interior, come in opposite pairs, and cancel out of
-    the sum by themselves.  (Verified: at interior top vertices of
-    both patch cleavages the sum is exactly vertical.)
+    (Gouraud) normal, color, ambient occlusion -- 13 floats.  The
+    smooth normal at a surface point is the normalised sum of the
+    flat normals of every face meeting there, across the whole set;
+    faces shared between two cells are interior, come in opposite
+    pairs, and cancel out of the sum by themselves.  (Verified: at
+    interior top vertices of both patch cleavages the sum is exactly
+    vertical.)
+
+    Ambient occlusion is per (face, vertex), voxel-style: count the
+    cells that share this vertex AND lie in front of this face's
+    plane -- those are the neighbours crowding the corner.  Flat
+    ground scores 0 everywhere on top (nothing is in front of an
+    up-face), so open ground stays uniform; wall bases, inside
+    corners and column feet pick up occlusion.
     """
     pos, nrm, idx = cell_mesh(s)
     rot = rotation
     off = np.asarray(offset, dtype=np.float64)
+    cell_set = {(c.i, c.j, c.k) for c in cells}
+    # Unique vertex offsets of one cell (cell_mesh emits 48 verts =
+    # 12 faces x 4, with duplicates at shared corners), and for each
+    # one, the cell offsets whose cells can share it (precomputed
+    # once -- keeps the per-vertex AO loop to a handful of checks).
+    unique_verts = np.unique(np.round(pos, 6), axis=0)
+    deltas = [
+        (di, dj, dk)
+        for di in (-2, -1, 0, 1, 2)
+        for dj in (-2, -1, 0, 1, 2)
+        for dk in (-2, -1, 0, 1, 2)
+        if (di, dj, dk) != (0, 0, 0)
+    ]
+    coowners: dict[tuple, list[tuple[int, int, int]]] = {}
+    for v in unique_verts:
+        key = tuple(np.round(v, 6))
+        lst = []
+        for d in deltas:
+            rel = v - np.array(d, dtype=np.float64) * s
+            if np.any(np.all(np.abs(unique_verts - rel) < 1e-6, axis=1)):
+                lst.append(d)
+        coowners[key] = lst
+    ao_levels = [1.0, 0.85, 0.72, 0.60]
+
+    def occlusion(coord: FccCoord, local_v: np.ndarray, local_n: np.ndarray) -> float:
+        center = coord.to_world(s)
+        occ = 0
+        for di, dj, dk in coowners[tuple(np.round(local_v, 6))]:
+            other = (coord.i + di, coord.j + dj, coord.k + dk)
+            if other not in cell_set:
+                continue
+            oc = np.array(other, dtype=np.float64) * s
+            if float((oc - (center + local_v)) @ local_n) > 1e-6:
+                occ += 1
+        return ao_levels[min(occ, 3)]
+
     # First pass: world positions and flat normals.
-    placed: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    placed: list[tuple[np.ndarray, np.ndarray, np.ndarray, float]] = []
     for coord in cells:
         origin = off + rot @ coord.to_world(s)
         for n in range(len(pos)):
             world_n = rot @ nrm[n]
+            ao = occlusion(coord, pos[n], nrm[n])
             placed.append(
-                (rot @ pos[n] + origin, world_n, _face_color(world_n, coord))
+                (rot @ pos[n] + origin, world_n, _face_color(world_n, coord), ao)
             )
     # Smooth normals: group vertices by world position.
     sums: dict[tuple[float, float, float], np.ndarray] = {}
-    for p, n, _ in placed:
+    for p, n, _, _ in placed:
         key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
         sums[key] = sums.get(key, np.zeros(3)) + n
     verts_out: list[np.ndarray] = []
@@ -281,12 +327,12 @@ def build_cells_mesh(cells, s: float, rotation: np.ndarray, offset) -> tuple:
     for cell_no in range(len(cells)):
         base = cell_no * len(pos)
         for n in range(len(pos)):
-            p, nrm_flat, color = placed[base + n]
+            p, nrm_flat, color, ao = placed[base + n]
             key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
             smooth = sums[key]
             norm = np.linalg.norm(smooth)
             smooth = smooth / norm if norm > 0 else nrm_flat
-            verts_out.append(np.concatenate([p, nrm_flat, smooth, color]))
+            verts_out.append(np.concatenate([p, nrm_flat, smooth, color, [ao]]))
         idx_out.extend(base + int(t) for t in idx)
     return (
         np.array(verts_out, dtype=np.float32),
@@ -453,3 +499,24 @@ def column_cells_111() -> list[FccCoord]:
         ox, oy, oz = _course_offset(c)
         cells.append(FccCoord(bx + ox, by + oy, bz + oz))
     return cells
+
+
+def island_cells_100() -> list[FccCoord]:
+    """Everything standing on the {100} island, as one cell set --
+    one mesh, so smooth normals and AO see across the joins."""
+    return (
+        GroundPatch().cells
+        + wall_cells_100()
+        + wall_cells_100_b()
+        + column_cells_100()
+    )
+
+
+def island_cells_111() -> list[FccCoord]:
+    """Everything standing on the {111} island, as one cell set."""
+    return (
+        GroundPatch111().cells
+        + wall_cells_111()
+        + wall_cells_111_b()
+        + column_cells_111()
+    )
