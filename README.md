@@ -44,10 +44,11 @@ Python ≥ 3.10. Controls:
 | Space / E / U | up |
 | C / Q / O | down |
 | drag, primary mouse button | look, grab-the-world style, exact 1:1 tracking at infinity |
+| click (press + release, no drag) | toggle Minecraft-like mouse capture: hidden cursor, FPS look at the same angular scale |
 | wheel | fly speed |
 | hold Shift | 10x speed boost while held (the HUD shows the boosted speed) |
 | G | toggle flat / Gouraud shading on the ground patch |
-| Esc | quit |
+| Esc | release mouse capture; press again (uncaptured) to quit |
 
 Movement uses the view azimuth only — looking down and pressing W
 does not descend. Dragging uses the grab-the-world convention of
@@ -176,14 +177,27 @@ but with the real nouns in place:
   wobble that cancels -- alternating steps on {100}, the ABC cycle
   on {111}.
 
-The infinite planes sample a mipmapped pattern texture (16 m tile)
-with explicit gradients, so the GPU's anisotropic filtering (up to
-16x) integrates the true elongated footprint at grazing angles;
-an earlier procedural box filter washed the bedrock pattern out
-and shimmered at mid distance.
+The infinite planes sample a mipmapped pattern texture with
+explicit gradients, so the GPU's anisotropic filtering (up to 16x)
+integrates the true elongated footprint at grazing angles. The
+bedrock pattern is hexagonal: the texture tile is a rectangle
+(42 m x 24.25 m -- hex tilings have no square period), but the
+symmetry is hexagonal -- flat-top small hexagons (points east and
+west, like the sun), 3-coloured, grouped into big hexagons whose
+centres sit 7 small spacings apart: 49 small hexes by area, 50
+small centres per big hex by count, about a dozen of them exactly
+bisected by the parent edge. A second texture, tileable value
+noise at a 500 m period, modulates both planes at distance --
+brightness on the bedrock, a deep-to-light colour drift on the
+ocean -- so the far field varies the way a real surface does
+toward the horizon.
 
-Face colours are a base per orientation class times a per-cell
-tint of +/-3%. (The tint's first version used a structured hash at
+Blocks are one sandy colour all around (times the per-cell tint),
+lit by a hemisphere ambient (sky blue above, warm ground bounce
+below), the warm sun, and a per-vertex ambient occlusion term
+counted from the neighbouring blocks crowding each face corner.
+The sun itself is a hexagon in the sky -- flat top and bottom,
+points east and west. (The tint's first version used a structured hash at
 +/-10%: its low bits mirrored along the patch's symmetry axes and
 printed stripes and quadrant seams onto the terrain. The current
 splitmix-style hash is decorrelated, and the amplitude is subtle.

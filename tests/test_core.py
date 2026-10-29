@@ -102,7 +102,7 @@ class LatticeTests(unittest.TestCase):
         self.assertEqual((min(xs), max(xs)), (-15.0, 15.0))
         verts, idx = patch.build_mesh()
         # pos + flat normal + smooth normal + color
-        self.assertEqual(verts.shape[1], 12)
+        self.assertEqual(verts.shape[1], 13)
         self.assertEqual(len(idx) % 3, 0)
         # Peaks 1 m above the centre plane, bottom points 1 m below.
         self.assertAlmostEqual(float(verts[:, 1].max()), 1.0)
@@ -251,10 +251,10 @@ class ShadingUniformityTests(unittest.TestCase):
         upper = verts[verts[:, 4] > 0.35]  # flat normal ny
         colors = {tuple(np.round(row[9:12], 6)) for row in upper}
         # The per-cell tint may vary colours, but only within +/-3%
-        # of the orientation class base (0.36, 0.60, 0.27), and it
-        # must actually vary (decorrelated hash, many distinct values).
+        # of the single sandy base colour, and it must actually vary
+        # (decorrelated hash, many distinct values).
         self.assertGreater(len(colors), 50)
-        base = np.array([0.36, 0.60, 0.27])
+        base = np.array([0.76, 0.65, 0.46])
         for color in colors:
             ratio = np.array(color) / base
             self.assertTrue(np.all(ratio > 0.965) and np.all(ratio < 1.035),
@@ -401,3 +401,33 @@ class Wall100BAndColumnTests(unittest.TestCase):
             self.assertAlmostEqual(float(p[1]), 2 * n / math.sqrt(3.0), places=4)
             drift = (p - base) * np.array([1.0, 0.0, 1.0])
             self.assertLessEqual(float(np.linalg.norm(drift)), 0.83)
+
+
+class SandyAndAOTests(unittest.TestCase):
+    def test_all_orientations_sandy(self):
+        from rhombic_game.lattice import SANDY, GroundPatch
+
+        verts, _ = GroundPatch().build_mesh()
+        ratio = verts[:, 9:12] / SANDY[None, :]
+        self.assertTrue(np.all(ratio > 0.965) and np.all(ratio < 1.035))
+
+    def test_peaks_unoccluded_valleys_shaded(self):
+        from rhombic_game.lattice import GroundPatch
+
+        verts, _ = GroundPatch().build_mesh()
+        peaks = verts[(np.abs(verts[:, 1] - 1.0) < 1e-4) & (verts[:, 4] > 0.35)]
+        self.assertGreater(len(peaks), 50)
+        self.assertTrue(np.all(peaks[:, 12] == 1.0))
+        # Somewhere on the island mesh, neighbour blocks do occlude.
+        from rhombic_game.lattice import island_cells_100, build_cells_mesh
+
+        iverts, _ = build_cells_mesh(island_cells_100(), 1.0, np.eye(3), (0.0, 0.0, 0.0))
+        self.assertTrue(np.any(iverts[:, 12] < 1.0))
+        levels = {round(float(x), 2) for x in np.unique(iverts[:, 12])}
+        self.assertTrue(levels <= {1.0, 0.85, 0.72, 0.60})
+
+    def test_island_cell_counts(self):
+        from rhombic_game.lattice import island_cells_100, island_cells_111
+
+        self.assertEqual(len(island_cells_100()), 533)
+        self.assertEqual(len(island_cells_111()), 523)
