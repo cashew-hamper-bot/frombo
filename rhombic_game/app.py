@@ -31,8 +31,8 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 
 from . import planes, shaders
-from .lattice import GroundPatch
-from .math3d import Camera
+from .lattice import GroundPatch, GroundPatch111
+from .math3d import Camera, ray_direction
 
 FOV_Y = math.radians(70.0)
 NEAR = 0.1
@@ -126,13 +126,25 @@ class RDWidget(QOpenGLWidget):
         gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
         gl.glBindVertexArray(0)
 
-        # Ground patch (static, unoptimised merged mesh).
-        verts, idx = GroundPatch().build_mesh()
-        self._block_count = len(idx)
-        self._block_vao = gl.glGenVertexArrays(1)
+        # Ground patches (static, unoptimised merged meshes): the
+        # {100} cleavage at the origin and the {111} cleavage 75 m
+        # ahead, for side-by-side comparison.
+        self._patches = [
+            self._make_patch_vao(GroundPatch()),
+            self._make_patch_vao(GroundPatch111()),
+        ]
+
+        self._bedrock = _DynamicStrip()
+        self._sea = _DynamicStrip()
+        self._clock.start()
+
+    @staticmethod
+    def _make_patch_vao(patch):
+        verts, idx = patch.build_mesh()
+        vao = gl.glGenVertexArrays(1)
         vbo = gl.glGenBuffers(1)
         ebo = gl.glGenBuffers(1)
-        gl.glBindVertexArray(self._block_vao)
+        gl.glBindVertexArray(vao)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, vbo)
         gl.glBufferData(gl.GL_ARRAY_BUFFER, verts.nbytes, verts, gl.GL_STATIC_DRAW)
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, ebo)
@@ -144,10 +156,7 @@ class RDWidget(QOpenGLWidget):
                 loc, 3, gl.GL_FLOAT, gl.GL_FALSE, stride, gl.GLvoidp(offset)
             )
         gl.glBindVertexArray(0)
-
-        self._bedrock = _DynamicStrip()
-        self._sea = _DynamicStrip()
-        self._clock.start()
+        return vao, len(idx)
 
     # -- per-frame ----------------------------------------------------
 
@@ -218,8 +227,9 @@ class RDWidget(QOpenGLWidget):
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uHazeColor"), 1, haze)
-        gl.glBindVertexArray(self._block_vao)
-        gl.glDrawElements(gl.GL_TRIANGLES, self._block_count, gl.GL_UNSIGNED_INT, None)
+        for vao, count in self._patches:
+            gl.glBindVertexArray(vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
 
         # 3. Complete infinite bedrock plane (4 vertices).
@@ -286,21 +296,48 @@ class RDWidget(QOpenGLWidget):
         self.setFocus()
         super().mousePressEvent(event)
 
+    def _drag_glue(self, new_pos) -> None:
+        """Grab-the-world dragging with exact 1:1 tracking at infinity.
+
+        The scene follows the cursor, as in panorama viewers and map
+        apps (the opposite sense from FPS mouse-look).  Rather than a
+        fixed radians-per-pixel rate, each motion event rotates the
+        camera by the exact rotation that carries the world direction
+        currently under the cursor onto the direction that was under
+        the cursor at the previous event -- so an object at infinity
+        stays glued to the pointer at any screen position, centre or
+        edge.  Two passes: the second mops up the sub-pixel residue
+        of projecting the rotation back onto yaw/pitch.
+        """
+        w = max(1.0, float(self.width()))
+        h = max(1.0, float(self.height()))
+
+        def ndc(p):
+            return (2.0 * p.x() / w - 1.0, 1.0 - 2.0 * p.y() / h)
+
+        cam = self.camera
+        for _ in range(2):
+            inv = np.linalg.inv(cam.view_projection(FOV_Y, w / h, NEAR))
+            a = ray_direction(inv, *ndc(new_pos))
+            b = ray_direction(inv, *ndc(self._last_mouse))
+            axis = np.cross(a, b)
+            s = float(np.linalg.norm(axis))
+            if s < 1e-12:
+                break
+            axis = axis / s
+            c = float(np.clip(a @ b, -1.0, 1.0))
+            f = cam.forward()
+            f2 = f * c + np.cross(axis, f) * s + axis * float(axis @ f) * (1.0 - c)
+            cam.yaw = float(np.arctan2(-f2[0], -f2[2]))
+            cam.pitch = float(
+                np.clip(np.arcsin(np.clip(f2[1], -1.0, 1.0)), -1.55, 1.55)
+            )
+
     def mouseMoveEvent(self, event) -> None:
         if self._last_mouse is not None and (
             event.buttons() & Qt.MouseButton.LeftButton
         ):
-            d = event.position() - self._last_mouse
-            # Grab-the-world dragging: the scene follows the cursor,
-            # as in panorama viewers and map apps.  This is the
-            # opposite sense from FPS mouse-look, where the viewpoint
-            # follows the mouse (drag right = look right).  Here drag
-            # right pulls the world right, so the view turns left;
-            # drag down pulls the world down, so the view looks up.
-            self.camera.yaw += d.x() * 0.005
-            self.camera.pitch = float(
-                np.clip(self.camera.pitch + d.y() * 0.005, -1.55, 1.55)
-            )
+            self._drag_glue(event.position())
         self._last_mouse = event.position()
         super().mouseMoveEvent(event)
 

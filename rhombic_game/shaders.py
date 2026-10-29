@@ -78,9 +78,20 @@ float _filteredAxis(float t, float w) {
 float filteredChecker(vec2 g) {
     vec2 dx = dFdx(g);
     vec2 dy = dFdy(g);
-    float fx = _filteredAxis(g.x, abs(dx.x) + abs(dy.x));
-    float fy = _filteredAxis(g.y, abs(dx.y) + abs(dy.y));
+    // Widths inflated by 1.25: bias the filter toward stability --
+    // the moire band lives where the footprint spans ~1-2 cells, and
+    // a slightly wider box costs little sharpness there.
+    float fx = _filteredAxis(g.x, (abs(dx.x) + abs(dy.x)) * 1.25);
+    float fy = _filteredAxis(g.y, (abs(dx.y) + abs(dy.y)) * 1.25);
     return 0.5 + 0.5 * fx * fy;
+}
+
+// Grid lines must vanish once their cells go sub-pixel: a line
+// pattern sampled below its own period aliases into moire bands no
+// matter how it is faded by distance, so gate by footprint instead.
+float gridFade(vec2 g) {
+    vec2 fw = fwidth(g);
+    return 1.0 - smoothstep(0.30, 0.60, max(fw.x, fw.y));
 }
 """
 
@@ -111,8 +122,8 @@ void main() {
     float check = filteredChecker(g8);
     vec3 col = mix(vec3(0.30, 0.28, 0.26), vec3(0.56, 0.53, 0.49), check);
 
-    float line1 = gridLine(wp.xz) * (1.0 - smoothstep(60.0, 500.0, dist));
-    float line8 = gridLine(g8) * (1.0 - smoothstep(400.0, 3000.0, dist));
+    float line1 = gridLine(wp.xz) * gridFade(wp.xz);
+    float line8 = gridLine(g8) * gridFade(g8) * (1.0 - smoothstep(400.0, 3000.0, dist));
     col = mix(col, vec3(0.16, 0.15, 0.14), line1 * 0.25);
     col = mix(col, vec3(0.10, 0.10, 0.10), line8 * 0.50);
 

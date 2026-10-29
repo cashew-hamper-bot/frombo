@@ -43,7 +43,7 @@ Python ≥ 3.10. Controls:
 | I J K L | move (right hand — for left-mousers), same plane |
 | Space / E / U | up |
 | C / Q / O | down |
-| drag, primary mouse button | look, grab-the-world style (scene follows cursor) |
+| drag, primary mouse button | look, grab-the-world style, exact 1:1 tracking at infinity |
 | wheel | fly speed |
 | G | toggle flat / Gouraud shading on the ground patch |
 | Esc | quit |
@@ -51,7 +51,19 @@ Python ≥ 3.10. Controls:
 Movement uses the view azimuth only — looking down and pressing W
 does not descend. Dragging uses the grab-the-world convention of
 panorama viewers and map apps, the opposite sense from FPS
-mouse-look: drag right pulls the world right, so the view turns left.
+mouse-look: drag right pulls the world right, so the view turns
+left. It is also *exact*: each drag step rotates the camera by the
+rotation that carries the direction under the cursor onto the
+direction previously under it, so an object at infinity stays glued
+to the pointer at any screen position (no fixed radians-per-pixel
+rate — the same drag travels further at wide FOV edges than at the
+centre, as it should).
+
+Running from an IDE: the canonical entry is `python -m rhombic_game`
+from the project root. To run a file directly (e.g. PyCharm's Run
+button), run `run.py` at the project root, or make a run
+configuration whose "Module name" is `rhombic_game` — the package's
+own modules use relative imports and cannot be run as scripts.
 
 ## The infinity math
 
@@ -95,8 +107,12 @@ out, and there is no giant finite quad to clip or z-fight.
   footprint (from the pattern coordinates' screen-space derivatives),
   so at grazing angles the across-view cells survive as stripes
   instead of averaging to grey — a procedural answer to anisotropic
-  filtering. Both planes haze out to the *same* colour the skybox
-  uses at the horizon, so plane and sky meet without a seam band.
+  filtering. The grid lines are gated by footprint too: a line
+  pattern sampled below its own period aliases into moiré bands no
+  matter how it is faded by distance, so lines now vanish once their
+  cells go sub-pixel. Both planes haze out to the *same* colour the
+  skybox uses at the horizon, so plane and sky meet without a seam
+  band.
 - The **sea plane** (y = −10, about 10 m below the terrain layer)
   has the hole: its strip walks once
   around the player — 12 finite rim vertices on a 500 m-radius
@@ -129,6 +145,12 @@ but with the real nouns in place:
   The G key cross-fades between them at runtime — flat shows the true
   rhombic facets; Gouraud softens the field of peaks considerably.
   No instancing, no culling: optimisation is a later slice, on purpose.
+- `GroundPatch111` — a second patch of the same lattice with the
+  other cleavage: centres on the (111) lattice plane (`i+j+k = 0`),
+  the whole lattice rotated so (1, 1, 1) points up. A 3-valent vertex
+  tops each cell at 0.866 m instead of 1.0 m, in a threefold pattern.
+  It sits 75 m ahead of the first patch so the two surfaces can be
+  compared in one flight.
 
 Orientation choice, made once here: a 4-valent (axis) vertex points
 straight up, so the layer's top is peaks at y = +1 m over the centres
