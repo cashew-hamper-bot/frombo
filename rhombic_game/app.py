@@ -31,8 +31,17 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 
 from . import planes, shaders
-from .lattice import GroundPatch, GroundPatch111
-from .math3d import Camera, ray_direction
+from .lattice import (
+    DEFAULT_S,
+    PATCH111_OFFSET,
+    PATCH111_ROTATION,
+    GroundPatch,
+    GroundPatch111,
+    build_cells_mesh,
+    wall_cells_100,
+    wall_cells_111,
+)
+from .math3d import Camera, drag_glue
 
 FOV_Y = math.radians(70.0)
 NEAR = 0.1
@@ -132,15 +141,28 @@ class RDWidget(QOpenGLWidget):
         self._patches = [
             self._make_patch_vao(GroundPatch()),
             self._make_patch_vao(GroundPatch111()),
+            # One wall segment on each patch (~4 high, ~5 long), so
+            # vertical surfaces can be judged in both cleavages.
+            self._vao_from_mesh(
+                *build_cells_mesh(wall_cells_100(), DEFAULT_S, np.eye(3), (0.0, 0.0, 0.0))
+            ),
+            self._vao_from_mesh(
+                *build_cells_mesh(
+                    wall_cells_111(), DEFAULT_S, PATCH111_ROTATION, PATCH111_OFFSET
+                )
+            ),
         ]
 
         self._bedrock = _DynamicStrip()
         self._sea = _DynamicStrip()
         self._clock.start()
 
+    @classmethod
+    def _make_patch_vao(cls, patch):
+        return cls._vao_from_mesh(*patch.build_mesh())
+
     @staticmethod
-    def _make_patch_vao(patch):
-        verts, idx = patch.build_mesh()
+    def _vao_from_mesh(verts, idx):
         vao = gl.glGenVertexArrays(1)
         vbo = gl.glGenBuffers(1)
         ebo = gl.glGenBuffers(1)
@@ -315,23 +337,7 @@ class RDWidget(QOpenGLWidget):
         def ndc(p):
             return (2.0 * p.x() / w - 1.0, 1.0 - 2.0 * p.y() / h)
 
-        cam = self.camera
-        for _ in range(2):
-            inv = np.linalg.inv(cam.view_projection(FOV_Y, w / h, NEAR))
-            a = ray_direction(inv, *ndc(new_pos))
-            b = ray_direction(inv, *ndc(self._last_mouse))
-            axis = np.cross(a, b)
-            s = float(np.linalg.norm(axis))
-            if s < 1e-12:
-                break
-            axis = axis / s
-            c = float(np.clip(a @ b, -1.0, 1.0))
-            f = cam.forward()
-            f2 = f * c + np.cross(axis, f) * s + axis * float(axis @ f) * (1.0 - c)
-            cam.yaw = float(np.arctan2(-f2[0], -f2[2]))
-            cam.pitch = float(
-                np.clip(np.arcsin(np.clip(f2[1], -1.0, 1.0)), -1.55, 1.55)
-            )
+        drag_glue(self.camera, FOV_Y, w / h, NEAR, ndc(self._last_mouse), ndc(new_pos))
 
     def mouseMoveEvent(self, event) -> None:
         if self._last_mouse is not None and (

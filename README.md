@@ -57,7 +57,10 @@ rotation that carries the direction under the cursor onto the
 direction previously under it, so an object at infinity stays glued
 to the pointer at any screen position (no fixed radians-per-pixel
 rate — the same drag travels further at wide FOV edges than at the
-centre, as it should).
+centre, as it should). The solve keeps the grabbed direction fixed
+in world space and refines yaw/pitch by Newton iterations; an
+earlier version re-aimed at a moving target each pass and applied
+the step twice, dragging ~2x too fast.
 
 Running from an IDE: the canonical entry is `python -m rhombic_game`
 from the project root. To run a file directly (e.g. PyCharm's Run
@@ -151,6 +154,19 @@ but with the real nouns in place:
   tops each cell at 0.866 m instead of 1.0 m, in a threefold pattern.
   It sits 75 m ahead of the first patch so the two surfaces can be
   compared in one flight.
+- One **wall segment** stands on each patch (~4 courses high, ~5
+  blocks long: `wall_cells_100`, `wall_cells_111`), for judging
+  vertical surfaces in both cleavages. Stacking is staggered by the
+  lattice in both frames -- in {111} each course also shifts
+  sideways as it nestles into the hollows below.
+
+Face colours depend on orientation class only -- no per-cell
+variation. (A per-cell hash tint once shipped here; it made
+corresponding faces of neighbouring blocks differ, visible as
+stripes and as seams along the patch's symmetry axes, in flat and
+Gouraud shading alike. The Gouraud normals themselves were checked
+numerically: at interior top vertices they are exactly vertical,
+as symmetry suggests.)
 
 Orientation choice, made once here: a 4-valent (axis) vertex points
 straight up, so the layer's top is peaks at y = +1 m over the centres

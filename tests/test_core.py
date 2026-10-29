@@ -19,7 +19,7 @@ from rhombic_game.lattice import (
     cell_mesh,
     rd_faces,
 )
-from rhombic_game.math3d import Camera, perspective_infinite, ray_direction
+from rhombic_game.math3d import Camera, drag_glue, perspective_infinite, ray_direction
 
 
 def ndc(m: np.ndarray, p: np.ndarray) -> np.ndarray:
@@ -238,3 +238,64 @@ class RayDirectionTests(unittest.TestCase):
         right_ray = ray_direction(inv, 0.9, 0.0)
         self.assertGreater(float(right_ray @ cam.right()), 0.5)
         self.assertGreater(float(right_ray @ cam.forward()), 0.5)
+
+
+class ShadingUniformityTests(unittest.TestCase):
+    """Regression pins for the stripes/quadrant-seam bug: a per-cell
+    hash tint once made corresponding faces of neighbouring blocks
+    differ.  Colour must depend on orientation class only, and the
+    smooth normals at interior top vertices must be exactly up."""
+
+    def _check(self, patch, center_xz):
+        verts, _ = patch.build_mesh()
+        upper = verts[verts[:, 4] > 0.35]  # flat normal ny
+        colors = {tuple(np.round(row[9:12], 6)) for row in upper}
+        self.assertEqual(len(colors), 1, f"upper-face colors differ: {colors}")
+        cx, cz = center_xz
+        top = verts[
+            (np.abs(verts[:, 0] - cx) < 10)
+            & (np.abs(verts[:, 2] - cz) < 10)
+            & (verts[:, 1] > 0.25)
+        ]
+        self.assertGreater(len(top), 100)
+        for row in top:
+            np.testing.assert_allclose(row[6:9], [0.0, 1.0, 0.0], atol=1e-4)
+
+    def test_patch_100_uniform(self):
+        self._check(GroundPatch(), (0.0, 0.0))
+
+    def test_patch_111_uniform(self):
+        self._check(GroundPatch111(offset=(0.0, 0.0, 0.0)), (0.0, 0.0))
+
+
+class WallTests(unittest.TestCase):
+    def test_wall_100(self):
+        from rhombic_game.lattice import wall_cells_100
+
+        cells = wall_cells_100()
+        self.assertEqual(len(cells), 22)
+        self.assertTrue(all(c.k == 0 and 1 <= c.j <= 4 for c in cells))
+
+    def test_wall_111_courses_climb(self):
+        from rhombic_game.lattice import PATCH111_ROTATION, wall_cells_111
+
+        cells = wall_cells_111()
+        self.assertEqual(len(cells), 20)
+        heights = sorted(
+            {round(float((PATCH111_ROTATION @ c.to_world(1.0))[1]), 4) for c in cells}
+        )
+        expected = [round(2 * course / math.sqrt(3.0), 4) for course in range(1, 5)]
+        self.assertEqual(heights, expected)
+
+
+class DragGlueTests(unittest.TestCase):
+    def test_grabbed_direction_stays_under_cursor(self):
+        cam = Camera()
+        cam.yaw, cam.pitch = 0.7, -0.3
+        fov, aspect, near = 1.1, 1.6, 0.1
+        ndc_old, ndc_new = (0.10, 0.05), (0.38, -0.12)
+        inv = np.linalg.inv(cam.view_projection(fov, aspect, near))
+        target = ray_direction(inv, *ndc_old)
+        drag_glue(cam, fov, aspect, near, ndc_old, ndc_new)
+        inv2 = np.linalg.inv(cam.view_projection(fov, aspect, near))
+        np.testing.assert_allclose(ray_direction(inv2, *ndc_new), target, atol=1e-6)
