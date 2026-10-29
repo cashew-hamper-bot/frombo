@@ -32,27 +32,41 @@ SKY_FRAG = """
 #version 330 core
 in vec3 vDir;
 uniform vec3 uSunDir;
+uniform float uUnder;
 out vec4 fragColor;
 void main() {
     vec3 d = normalize(vDir);
+    // Day palette: below the horizon the sky is deep ocean, darker
+    // -- as if you were under the water yourself.
     vec3 zenith = vec3(0.22, 0.46, 0.82);
     vec3 horizon = vec3(0.78, 0.86, 0.94);
-    vec3 below = vec3(0.55, 0.60, 0.64);
+    vec3 below = vec3(0.03, 0.12, 0.22);
+    // Nether palette (camera below the bedrock): molten dark reds.
+    vec3 nZenith = vec3(0.10, 0.02, 0.015);
+    vec3 nHorizon = vec3(0.40, 0.11, 0.04);
+    vec3 nBelow = vec3(0.05, 0.01, 0.008);
+    zenith = mix(zenith, nZenith, uUnder);
+    horizon = mix(horizon, nHorizon, uUnder);
+    below = mix(below, nBelow, uUnder);
     vec3 col = d.y >= 0.0
-        ? mix(horizon, zenith, pow(d.y, 0.55))
+        ? mix(horizon, zenith, pow(clamp(d.y, 0.0, 1.0), 0.40))
         : mix(horizon, below, clamp(-d.y * 3.0, 0.0, 1.0));
     float s = max(dot(d, uSunDir), 0.0);
     // The sun is a hexagon (flat top and bottom, points east and
     // west), drawn by its signed distance function in the tangent
-    // plane at the sun direction.
+    // plane at the sun direction.  Note the flat lower edge is what
+    // sits parallel to the horizon at sunrise/sunset; swapping the
+    // two SDF terms would put points up/down instead (flat sides
+    // east/west).
     vec3 uAxis = normalize(cross(vec3(0.0, 1.0, 0.0), uSunDir)); // ~east-west
     vec3 vAxis = cross(uSunDir, uAxis);                            // ~up
     vec2 tp = vec2(dot(d, uAxis), dot(d, vAxis));
     vec2 ap = abs(tp);
     float hexSdf = max(dot(ap, vec2(0.8660254, 0.5)), ap.y) - 0.052;
-    col += vec3(1.0, 0.95, 0.85) * (1.0 - smoothstep(-0.002, 0.002, hexSdf)) * 1.6;
-    col += vec3(1.0, 0.97, 0.88) * pow(s, 350.0) * 0.35;              // corona
-    col += vec3(0.9, 0.95, 1.0) * pow(s, 8.0) * 0.10;                 // wide glow
+    float sunAmt = 1.0 - 0.8 * uUnder;
+    col += vec3(1.0, 0.95, 0.85) * (1.0 - smoothstep(-0.002, 0.002, hexSdf)) * 1.6 * sunAmt;
+    col += vec3(1.0, 0.97, 0.88) * pow(s, 350.0) * 0.35 * sunAmt;     // corona
+    col += vec3(0.9, 0.95, 1.0) * pow(s, 8.0) * 0.10 * sunAmt;        // wide glow
     fragColor = vec4(col, 1.0);
 }
 """
@@ -95,7 +109,13 @@ void main() {
     float n = texture(uNoise, wp.xz / 500.0).r;
     col *= mix(1.0, 0.88 + 0.24 * n, smoothstep(60.0, 600.0, dist));
 
-    col = mix(col, uHazeColor, smoothstep(800.0, 7000.0, dist));
+    // Haze: an exponential fade that never quite completes at any
+    // finite distance.  A smoothstep that reaches 1.0 draws its own
+    // contour on the plane -- an equal-distance arc that reads as a
+    // curved white "horizon" floating in front of the real
+    // (straight) one.  This way the pattern only asymptotically
+    // approaches the sky colour and no contour ever forms.
+    col = mix(col, uHazeColor, 1.0 - exp(-dist * 0.00012));
     fragColor = vec4(col, 1.0);
 }
 """
@@ -117,11 +137,13 @@ void main() {
     vec3 wp = vHomog.xyz / vHomog.w;
     float dist = length(wp - uCamPos);
 
-    // The shared pattern texture's alpha holds the bare 2x2 checker
-    // factor; at a 50 m tile that is the sea's 25 m checkerboard.
-    vec2 uv = wp.xz / 50.0;
-    float check = textureGrad(uTex, uv, dFdx(uv), dFdy(uv)).a;
-    vec3 col = mix(vec3(0.045, 0.21, 0.37), vec3(0.075, 0.28, 0.45), check * 0.6);
+    // The sea is hexagonal too: the shared pattern texture's alpha
+    // holds the hex factor, sampled here at twice the bedrock tile
+    // (84 m), so the sea's small hexes are 8 m and its big hexagons
+    // ~48 m across.
+    vec2 uv = wp.xz / vec2(84.0, 48.4974226119);
+    float hexf = textureGrad(uTex, uv, dFdx(uv), dFdy(uv)).a;
+    vec3 col = mix(vec3(0.045, 0.21, 0.37), vec3(0.10, 0.34, 0.52), hexf);
 
     // Large-scale colour drift toward the horizon (500 m tileable
     // noise): the way the open ocean's colour varies when you look
@@ -138,7 +160,9 @@ void main() {
     float sheen = pow(max(dot(vec3(0.0, 1.0, 0.0), halfVec), 0.0), 8.0);
     col += vec3(0.5, 0.6, 0.7) * sheen * 0.08;
 
-    col = mix(col, uHazeColor, smoothstep(600.0, 6000.0, dist));
+    // Exponential haze (see the bedrock shader): no finite-distance
+    // contour arc masquerading as a curved horizon.
+    col = mix(col, uHazeColor, 1.0 - exp(-dist * 0.00012));
     fragColor = vec4(col, 0.86);
 }
 """
@@ -187,8 +211,10 @@ void main() {
     float ndl = max(dot(n, uSunDir), 0.0);
     vec3 sun = vec3(1.0, 0.93, 0.80) * ndl;
     // Local ambient occlusion (per-vertex, from neighbour blocks)
-    // scales the ambient only -- direct sun still reaches in.
-    vec3 col = vColor * (hemi * (0.35 + 0.65 * vAO) + sun * 0.95);
+    // scales the ambient only -- direct sun still reaches in.  A
+    // flat minimum ambient term keeps the darkest vertices readable
+    // (no global illumination is coming to save them).
+    vec3 col = vColor * (hemi * (0.45 + 0.55 * vAO) + vec3(0.16) + sun * 0.95);
     float dist = length(vWorld - uCamPos);
     col = mix(col, uHazeColor, smoothstep(900.0, 7000.0, dist));
     fragColor = vec4(col, 1.0);
