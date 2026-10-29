@@ -39,13 +39,19 @@ Python ≥ 3.10. Controls:
 
 | input | action |
 |---|---|
-| W A S D | fly (left hand) |
-| I J K L | fly (right hand — for left-mousers) |
+| W A S D | move (left hand), in the current horizontal plane |
+| I J K L | move (right hand — for left-mousers), same plane |
 | Space / E / U | up |
 | C / Q / O | down |
-| drag, primary mouse button | look |
+| drag, primary mouse button | look, grab-the-world style (scene follows cursor) |
 | wheel | fly speed |
+| G | toggle flat / Gouraud shading on the ground patch |
 | Esc | quit |
+
+Movement uses the view azimuth only — looking down and pressing W
+does not descend. Dragging uses the grab-the-world convention of
+panorama viewers and map apps, the opposite sense from FPS
+mouse-look: drag right pulls the world right, so the view turns left.
 
 ## The infinity math
 
@@ -73,8 +79,8 @@ fragment shader recovers the true world point as `xyz / w`, which is
 exact at every distance — texturing never distorts and never runs
 out, and there is no giant finite quad to clip or z-fight.
 
-- The **bedrock plane** (y = −1, tangent to the ground layer's bottom
-  points) is complete, so 4 vertices suffice: the strip is one quad —
+- The **bedrock plane** (y = −100, about 100 m below the terrain
+  layer) is complete, so 4 vertices suffice: the strip is one quad —
   a finite grounding segment (two w = 1 vertices) set behind and wide
   around the point below the camera, opening to two w = 0 horizon
   vertices at wide (~80°) forward-left and forward-right angles.
@@ -84,9 +90,15 @@ out, and there is no giant finite quad to clip or z-fight.
   and from altitude the visible near-ground region is wide — the
   segment's back-off and width scale with height to cover both; this
   is coverage only, since shading is analytic). The 8 m checkerboard
-  (plus 1 m / 8 m grid lines, contrast-faded as cells go sub-pixel) is
-  the texture that makes fast flight legible.
-- The **sea plane** (y = +0.5) has the hole: its strip walks once
+  (plus 1 m / 8 m grid lines) is the texture that makes fast flight
+  legible; the checker is box-filtered over each fragment's actual
+  footprint (from the pattern coordinates' screen-space derivatives),
+  so at grazing angles the across-view cells survive as stripes
+  instead of averaging to grey — a procedural answer to anisotropic
+  filtering. Both planes haze out to the *same* colour the skybox
+  uses at the horizon, so plane and sky meet without a seam band.
+- The **sea plane** (y = −10, about 10 m below the terrain layer)
+  has the hole: its strip walks once
   around the player — 12 finite rim vertices on a 500 m-radius
   dodecagon, each followed by the horizon vertex in the same azimuth,
   plus a repeated first pair to close the loop (13 + 13 vertices,
@@ -110,9 +122,13 @@ but with the real nouns in place:
   ratio √2 : 1. Tests pin all of this down, including the cell volume
   (2 m³ at s = 1, the FCC primitive-cell volume).
 - `GroundPatch` — one layer (`j = 0`), centres spanning ±15 m,
-  481 cells, merged into a single static VBO with flat per-face
-  normals and per-cell tint variation. No instancing, no culling:
-  optimisation is a later slice, on purpose.
+  481 cells, merged into a single static VBO with per-cell tint
+  variation and *two* normals per vertex: the flat per-face normal,
+  and a smooth (Gouraud) normal averaged over every face meeting at
+  that point (interior faces shared between cells cancel in pairs).
+  The G key cross-fades between them at runtime — flat shows the true
+  rhombic facets; Gouraud softens the field of peaks considerably.
+  No instancing, no culling: optimisation is a later slice, on purpose.
 
 Orientation choice, made once here: a 4-valent (axis) vertex points
 straight up, so the layer's top is peaks at y = +1 m over the centres
@@ -138,9 +154,9 @@ tools/smoke_render.py  offscreen render to PNG, for eyeballing changes
   seedlings. A richer object model (regions/chunks on an FCC lattice,
   what a "layer" means vertically given the parity invariant) should
   grow from use, not be designed up front.
-- **Sea level vs. the layer.** Sea at y = +0.5 coincides with the
-  saddle height of the ground layer; whether sea level should be
-  defined *in cell terms* is open.
+- **Levels in cell terms.** Sea (−10 m) and bedrock (−100 m) are
+  currently round metric offsets from the layer's centre plane;
+  whether they should be defined *in cell terms* is open.
 - **The grounding segment's width** for the bedrock strip is a
   coverage detail only (shading comes from the recovered world
   position), but its interaction with extreme pitch/FOV corners could

@@ -100,11 +100,23 @@ class LatticeTests(unittest.TestCase):
         xs = [c.to_world()[0] for c in patch.cells]
         self.assertEqual((min(xs), max(xs)), (-15.0, 15.0))
         verts, idx = patch.build_mesh()
-        self.assertEqual(verts.shape[1], 9)  # pos + normal + color
+        # pos + flat normal + smooth normal + color
+        self.assertEqual(verts.shape[1], 12)
         self.assertEqual(len(idx) % 3, 0)
-        # Peaks 1 m above the centre plane, bottom points at bedrock.
+        # Peaks 1 m above the centre plane, bottom points 1 m below.
         self.assertAlmostEqual(float(verts[:, 1].max()), 1.0)
         self.assertAlmostEqual(float(verts[:, 1].min()), -1.0)
+        # The smooth normal at a peak (0, 1, 0) points straight up,
+        # even though every flat face normal there is diagonal.
+        peak = verts[
+            (np.abs(verts[:, 0]) < 1e-6)
+            & (np.abs(verts[:, 1] - 1.0) < 1e-6)
+            & (np.abs(verts[:, 2]) < 1e-6)
+        ]
+        self.assertGreater(len(peak), 0)
+        for row in peak:
+            np.testing.assert_allclose(row[6:9], [0.0, 1.0, 0.0], atol=1e-5)
+            self.assertLess(abs(float(row[3])), 0.99)  # flat normal is diagonal
 
 
 class PlaneGeometryTests(unittest.TestCase):
@@ -156,10 +168,11 @@ class PlaneGeometryTests(unittest.TestCase):
             h = num / den
             return h[:3] / h[3]
 
+        y = planes.BEDROCK_Y
         for point in (
-            np.array([5.0, -1.0, 0.0]),
-            np.array([-20.0, -1.0, -100.0]),
-            np.array([150.0, -1.0, -800.0]),
+            np.array([5.0, y, -30.0]),
+            np.array([-20.0, y, -150.0]),
+            np.array([150.0, y, -800.0]),
         ):
             got = recover(point, (0, 1, 2))
             if got is None:
