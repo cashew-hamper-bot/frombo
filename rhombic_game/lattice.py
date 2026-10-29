@@ -162,21 +162,22 @@ def cell_mesh(s: float = DEFAULT_S):
     )
 
 
-def _tint(coord: FccCoord) -> float:
-    """Deterministic per-cell brightness variation in [0.90, 1.10]."""
-    h = (coord.i * 73856093) ^ (coord.j * 19349663) ^ (coord.k * 83492791)
-    return 0.90 + 0.20 * ((h & 0xFFFF) / 0xFFFF)
-
-
 def _face_color(normal: np.ndarray, coord: FccCoord) -> np.ndarray:
+    """Face colour by orientation class only.
+
+    Deliberately NOT varied per cell: an earlier version multiplied
+    in a per-cell hash tint, which made corresponding faces of
+    neighbouring blocks differ -- visible as stripes and as seams
+    along the patch's symmetry axes (the hash's low bits mirror at
+    i = 0 / k = 0).  Uniformity is the correct look here: every face
+    with the same orientation gets the same colour.
+    """
     ny = float(normal[1])
     if ny > 0.35:
-        base = np.array([0.36, 0.60, 0.27])  # grassy upper rhombi
-    elif ny < -0.35:
-        base = np.array([0.23, 0.18, 0.14])  # shadowed underside
-    else:
-        base = np.array([0.52, 0.40, 0.29])  # earthy sides
-    return base * _tint(coord)
+        return np.array([0.36, 0.60, 0.27])  # grassy upper rhombi
+    if ny < -0.35:
+        return np.array([0.23, 0.18, 0.14])  # shadowed underside
+    return np.array([0.52, 0.40, 0.29])  # earthy sides
 
 
 def rotation_y_to(direction) -> np.ndarray:
@@ -232,47 +233,58 @@ class GroundPatch:
         return self.offset + self.rotation @ coord.to_world(self.s)
 
     def build_mesh(self):
-        """Merged static mesh.
+        return build_cells_mesh(self.cells, self.s, self.rotation, self.offset)
 
-        Interleaved per vertex: position, flat (per-face) normal,
-        smooth (Gouraud) normal, color -- 12 floats.  The smooth
-        normal at a surface point is the normalised sum of the flat
-        normals of every face meeting there, across the whole patch;
-        faces shared between two cells are interior, come in opposite
-        pairs, and cancel out of the sum by themselves.
-        """
-        pos, nrm, idx = cell_mesh(self.s)
-        rot = self.rotation
-        # First pass: world positions and flat normals.
-        placed: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
-        for coord in self.cells:
-            origin = self.center_world(coord)
-            for n in range(len(pos)):
-                world_n = rot @ nrm[n]
-                placed.append(
-                    (rot @ pos[n] + origin, world_n, _face_color(world_n, coord))
-                )
-        # Smooth normals: group vertices by world position.
-        sums: dict[tuple[float, float, float], np.ndarray] = {}
-        for p, n, _ in placed:
+
+def build_cells_mesh(cells, s: float, rotation: np.ndarray, offset) -> tuple:
+    """Merge a set of cells into one static mesh.
+
+    Interleaved per vertex: position, flat (per-face) normal, smooth
+    (Gouraud) normal, color -- 12 floats.  The smooth normal at a
+    surface point is the normalised sum of the flat normals of every
+    face meeting there, across the whole set; faces shared between
+    two cells are interior, come in opposite pairs, and cancel out of
+    the sum by themselves.  (Verified: at interior top vertices of
+    both patch cleavages the sum is exactly vertical.)
+    """
+    pos, nrm, idx = cell_mesh(s)
+    rot = rotation
+    off = np.asarray(offset, dtype=np.float64)
+    # First pass: world positions and flat normals.
+    placed: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for coord in cells:
+        origin = off + rot @ coord.to_world(s)
+        for n in range(len(pos)):
+            world_n = rot @ nrm[n]
+            placed.append(
+                (rot @ pos[n] + origin, world_n, _face_color(world_n, coord))
+            )
+    # Smooth normals: group vertices by world position.
+    sums: dict[tuple[float, float, float], np.ndarray] = {}
+    for p, n, _ in placed:
+        key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
+        sums[key] = sums.get(key, np.zeros(3)) + n
+    verts_out: list[np.ndarray] = []
+    idx_out: list[int] = []
+    for cell_no in range(len(cells)):
+        base = cell_no * len(pos)
+        for n in range(len(pos)):
+            p, nrm_flat, color = placed[base + n]
             key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
-            sums[key] = sums.get(key, np.zeros(3)) + n
-        verts_out: list[np.ndarray] = []
-        idx_out: list[int] = []
-        for cell_no, coord in enumerate(self.cells):
-            base = cell_no * len(pos)
-            for n in range(len(pos)):
-                p, nrm_flat, color = placed[base + n]
-                key = (round(float(p[0]), 6), round(float(p[1]), 6), round(float(p[2]), 6))
-                smooth = sums[key]
-                norm = np.linalg.norm(smooth)
-                smooth = smooth / norm if norm > 0 else nrm_flat
-                verts_out.append(np.concatenate([p, nrm_flat, smooth, color]))
-            idx_out.extend(base + int(t) for t in idx)
-        return (
-            np.array(verts_out, dtype=np.float32),
-            np.array(idx_out, dtype=np.uint32),
+            smooth = sums[key]
+            norm = np.linalg.norm(smooth)
+            smooth = smooth / norm if norm > 0 else nrm_flat
+            verts_out.append(np.concatenate([p, nrm_flat, smooth, color]))
+        idx_out.extend(base + int(t) for t in idx)
+    return (
+        np.array(verts_out, dtype=np.float32),
+        np.array(idx_out, dtype=np.uint32),
         )
+
+
+# The {111} patch's frame, shared by the patch and its wall.
+PATCH111_ROTATION = rotation_y_to((1.0, 1.0, 1.0)).T
+PATCH111_OFFSET = (0.0, 0.0, -75.0)
 
 
 class GroundPatch111(GroundPatch):
@@ -291,16 +303,17 @@ class GroundPatch111(GroundPatch):
         self,
         radius: float = 16.0,
         s: float = DEFAULT_S,
-        offset=(0.0, 0.0, -75.0),
+        offset=PATCH111_OFFSET,
     ):
         self.radius = radius
         super().__init__(
             half=0,
             s=s,
-            # The transpose of "y onto (1,1,1)" is "(1,1,1) onto y":
-            # centres with i+j+k = 0 then land in the world y = 0
-            # plane, and each cell's (1,1,1) vertex points up.
-            rotation=rotation_y_to((1.0, 1.0, 1.0)).T,
+            # PATCH111_ROTATION is the transpose of "y onto (1,1,1)",
+            # i.e. "(1,1,1) onto y": centres with i+j+k = 0 then land
+            # in the world y = 0 plane, and each cell's (1,1,1)
+            # vertex points up.
+            rotation=PATCH111_ROTATION,
             offset=offset,
         )
 
@@ -314,3 +327,33 @@ class GroundPatch111(GroundPatch):
                 if math.hypot(float(p[0]), float(p[2])) <= self.radius:
                     out.append(coord)
         return out
+
+
+def wall_cells_100() -> list[FccCoord]:
+    """Wall segment for the {100} patch: ~4 courses high, ~5 blocks long.
+
+    A one-cell-thick slab in the k = 0 plane, sitting on the ground
+    layer (j = 0 is the patch itself).  Vertical stacking in this
+    frame is staggered by the FCC parity: course j holds the cells
+    with i + j even, each nestled between the two below it.
+    """
+    return [
+        FccCoord(i, j, 0)
+        for i in range(-5, 6)
+        for j in range(1, 5)
+        if (i + j) % 2 == 0
+    ]
+
+
+def wall_cells_111() -> list[FccCoord]:
+    """Wall segment for the {111} patch: 4 courses, 5 cells per course.
+
+    Stacking along (1, 1, 1): course c lives in the layer i+j+k = 2c
+    and is shifted by (c, c, 0) against the base row -- each course
+    nestles into the hollows of the one below, which is simply what
+    FCC stacking along [111] is.  Course 0 would duplicate patch
+    cells, so courses run 1..4 on top of the patch.
+    """
+    return [
+        FccCoord(m + c, c - m, 0) for c in range(1, 5) for m in range(5)
+    ]
