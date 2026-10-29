@@ -39,8 +39,8 @@ import math
 
 import numpy as np
 
-BEDROCK_Y = -1.0  # tangent to the bottom points of the ground layer
-SEA_Y = 0.5
+BEDROCK_Y = -100.0  # ~100 m below the terrain layer (centres at y = 0)
+SEA_Y = -10.0  # ~10 m below the terrain layer
 HOLE_RADIUS = 500.0  # the hole is ~1000 m wide
 HOLE_SEGMENTS = 12
 GROUNDING_HALF_WIDTH = 64.0
