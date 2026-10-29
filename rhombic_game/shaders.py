@@ -9,11 +9,12 @@
 """
 
 SUN_DIR = (-0.45, 0.62, -0.35)  # static daytime sun (normalised in shader)
-# One horizon colour, shared by everything that reaches the horizon:
-# the sky gradient's horizon value (in SKY_FRAG), the planes' distance
-# haze, and the GL clear colour.  If these disagree, the seam between
-# a hazed-out plane and the sky shows as a grey band at the horizon.
-HAZE_COLOR = (0.78, 0.86, 0.94)
+# The sky gradient's horizon colour, also used as the GL clear
+# colour.  Nothing in the scene is distance-hazed: haze is a hack
+# for masking the limits of finite renderers, and this renderer is
+# infinity-first -- the planes run pattern-crisp to the true
+# horizon and meet the sky there directly.
+HAZE_COLOR = (0.78, 0.86, 0.94)  # (name kept; it is the horizon colour now)
 
 SKY_VERT = """
 #version 330 core
@@ -86,7 +87,6 @@ _BEDROCK_FRAG = """
 #version 330 core
 in vec4 vHomog;
 uniform vec3 uCamPos;
-uniform vec3 uHazeColor;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
 out vec4 fragColor;
@@ -109,13 +109,8 @@ void main() {
     float n = texture(uNoise, wp.xz / 500.0).r;
     col *= mix(1.0, 0.88 + 0.24 * n, smoothstep(60.0, 600.0, dist));
 
-    // Haze: an exponential fade that never quite completes at any
-    // finite distance.  A smoothstep that reaches 1.0 draws its own
-    // contour on the plane -- an equal-distance arc that reads as a
-    // curved white "horizon" floating in front of the real
-    // (straight) one.  This way the pattern only asymptotically
-    // approaches the sky colour and no contour ever forms.
-    col = mix(col, uHazeColor, 1.0 - exp(-dist * 0.00012));
+    // No distance haze, by design (infinity-first: the pattern
+    // runs crisp to the true horizon).
     fragColor = vec4(col, 1.0);
 }
 """
@@ -126,7 +121,6 @@ _SEA_FRAG = (
 in vec4 vHomog;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
-uniform vec3 uHazeColor;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
 out vec4 fragColor;
@@ -160,9 +154,7 @@ void main() {
     float sheen = pow(max(dot(vec3(0.0, 1.0, 0.0), halfVec), 0.0), 8.0);
     col += vec3(0.5, 0.6, 0.7) * sheen * 0.08;
 
-    // Exponential haze (see the bedrock shader): no finite-distance
-    // contour arc masquerading as a curved horizon.
-    col = mix(col, uHazeColor, 1.0 - exp(-dist * 0.00012));
+    // No distance haze, by design (see the bedrock shader).
     fragColor = vec4(col, 0.86);
 }
 """
@@ -200,7 +192,6 @@ in vec3 vWorld;
 in float vAO;
 uniform vec3 uSunDir;
 uniform vec3 uCamPos;
-uniform vec3 uHazeColor;
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(vNormal);
@@ -215,8 +206,6 @@ void main() {
     // flat minimum ambient term keeps the darkest vertices readable
     // (no global illumination is coming to save them).
     vec3 col = vColor * (hemi * (0.45 + 0.55 * vAO) + vec3(0.16) + sun * 0.95);
-    float dist = length(vWorld - uCamPos);
-    col = mix(col, uHazeColor, smoothstep(900.0, 7000.0, dist));
     fragColor = vec4(col, 1.0);
 }
 """
