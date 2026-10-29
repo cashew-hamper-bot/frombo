@@ -1,0 +1,187 @@
+"""Headless tests for the math that carries the design.
+
+Run with:  python -m unittest discover -s tests -v
+(Only numpy is needed -- no Qt, no GL context.)
+"""
+
+import math
+import unittest
+
+import numpy as np
+
+from rhombic_game import planes
+from rhombic_game.lattice import (
+    NEIGHBOR_OFFSETS,
+    FccCoord,
+    GroundPatch,
+    _vertex_table,
+    cell_mesh,
+    rd_faces,
+)
+from rhombic_game.math3d import Camera, perspective_infinite
+
+
+def ndc(m: np.ndarray, p: np.ndarray) -> np.ndarray:
+    clip = m @ p
+    return clip[:3] / clip[3]
+
+
+class InfiniteProjectionTests(unittest.TestCase):
+    def setUp(self):
+        self.m = perspective_infinite(math.radians(70.0), 16 / 9, 0.1)
+
+    def test_near_plane_maps_to_minus_one(self):
+        z = ndc(self.m, np.array([0.0, 0.0, -0.1, 1.0]))[2]
+        self.assertAlmostEqual(z, -1.0)
+
+    def test_far_finite_points_approach_but_never_reach_one(self):
+        for dist in (10.0, 1_000.0, 1_000_000.0):
+            z = ndc(self.m, np.array([0.0, 0.0, -dist, 1.0]))[2]
+            self.assertLess(z, 1.0)
+            self.assertGreater(z, 0.9)
+
+    def test_point_at_infinity_lands_exactly_on_far_plane(self):
+        # A direction straight ahead: w = 0.
+        z = ndc(self.m, np.array([0.0, 0.0, -1.0, 0.0]))[2]
+        self.assertAlmostEqual(z, 1.0)
+
+    def test_view_matrix_places_camera_correctly(self):
+        cam = Camera(position=np.array([0.0, 7.0, 20.0]), yaw=0.0, pitch=0.0)
+        eye = cam.view_matrix() @ np.array([0.0, 7.0, 19.0, 1.0])
+        np.testing.assert_allclose(eye, [0.0, 0.0, -1.0, 1.0], atol=1e-9)
+        # A direction is rotated but never translated.
+        d = cam.view_matrix() @ np.array([0.0, 0.0, -1.0, 0.0])
+        np.testing.assert_allclose(d, [0.0, 0.0, -1.0, 0.0], atol=1e-9)
+
+
+class LatticeTests(unittest.TestCase):
+    def test_parity_invariant_enforced(self):
+        with self.assertRaises(ValueError):
+            FccCoord(1, 0, 0)
+        FccCoord(1, 1, 0)  # must not raise
+
+    def test_twelve_neighbors_all_at_sqrt2(self):
+        self.assertEqual(len(NEIGHBOR_OFFSETS), 12)
+        origin = FccCoord(0, 0, 0)
+        for n in origin.neighbors():
+            d = np.linalg.norm(n.to_world() - origin.to_world())
+            self.assertAlmostEqual(d, math.sqrt(2.0))
+
+    def test_faces_are_rhombi_in_the_right_planes(self):
+        verts, _ = _vertex_table(1.0)
+        for quad, normal, offset in rd_faces(1.0):
+            pts = verts[list(quad)]
+            n = np.array(offset, dtype=float)
+            # All four vertices satisfy the face plane v . n = s.
+            np.testing.assert_allclose(pts @ n, np.ones(4), atol=1e-9)
+            # Equal sides, and diagonals in the ratio sqrt(2) : 1.
+            sides = [np.linalg.norm(pts[(a + 1) % 4] - pts[a]) for a in range(4)]
+            np.testing.assert_allclose(sides, sides[0], atol=1e-9)
+            d_long = np.linalg.norm(pts[2] - pts[0])
+            d_short = np.linalg.norm(pts[3] - pts[1])
+            self.assertAlmostEqual(max(d_long, d_short) / min(d_long, d_short),
+                                   math.sqrt(2.0))
+            # Winding gives the outward normal.
+            tri_n = np.cross(pts[1] - pts[0], pts[2] - pts[0])
+            self.assertGreater(float(tri_n @ normal), 0.0)
+
+    def test_cell_volume_is_the_fcc_primitive_volume(self):
+        pos, _, idx = cell_mesh(1.0)
+        volume = 0.0
+        for a, b, c in idx.reshape(-1, 3):
+            volume += float(np.dot(pos[a], np.cross(pos[b], pos[c]))) / 6.0
+        # One FCC point per 2 m^3 in this parametrisation.
+        self.assertAlmostEqual(abs(volume), 2.0, places=6)
+
+    def test_ground_patch_is_one_layer_about_30m(self):
+        patch = GroundPatch()
+        self.assertTrue(all(c.j == 0 for c in patch.cells))
+        self.assertEqual(len(patch.cells), 481)
+        xs = [c.to_world()[0] for c in patch.cells]
+        self.assertEqual((min(xs), max(xs)), (-15.0, 15.0))
+        verts, idx = patch.build_mesh()
+        self.assertEqual(verts.shape[1], 9)  # pos + normal + color
+        self.assertEqual(len(idx) % 3, 0)
+        # Peaks 1 m above the centre plane, bottom points at bedrock.
+        self.assertAlmostEqual(float(verts[:, 1].max()), 1.0)
+        self.assertAlmostEqual(float(verts[:, 1].min()), -1.0)
+
+
+class PlaneGeometryTests(unittest.TestCase):
+    def test_full_plane_has_4_vertices_two_at_infinity(self):
+        strip = planes.full_plane_strip(10.0, -4.0, -1.0, np.array([0.0, -1.0]))
+        self.assertEqual(strip.shape, (4, 4))
+        np.testing.assert_allclose(strip[:, 3], [1, 1, 0, 0])
+        # Finite vertices sit on the plane; horizon vertices are
+        # horizontal directions (y component exactly 0).
+        np.testing.assert_allclose(strip[:2, 1], [-1.0, -1.0])
+        np.testing.assert_allclose(strip[2:, 1], [0.0, 0.0])
+        for row in strip[2:]:
+            self.assertGreater(math.hypot(row[0], row[2]), 0.0)
+
+    def test_homogeneous_interpolation_recovers_plane_points(self):
+        """Simulate the GPU's perspective-correct interpolation of the
+        homogeneous varying across the bedrock strip: xyz / w must give
+        back the exact world point, near and far.  This is the property
+        the plane fragment shaders rely on for texturing."""
+        cam = Camera(position=np.array([0.0, 7.0, 20.0]), yaw=0.0, pitch=-0.3)
+        vp = cam.view_projection(math.radians(70.0), 16 / 9, 0.1)
+        # Centre the strip 10 m ahead of the camera so its grounding
+        # segment (set 10 m behind the centre at height 0) lands on the
+        # camera's ground point, keeping every vertex in front of the
+        # eye plane for this analytic check.  (In production the
+        # segment sits behind the camera and the GPU clips the strip
+        # at the eye plane; the interpolation property is the same.)
+        strip = planes.full_plane_strip(
+            0.0, 10.0, planes.BEDROCK_Y, cam.forward_xz()
+        ).astype(np.float64)
+        clip = np.array([vp @ v for v in strip])
+        ndc = clip[:, :3] / clip[:, 3:4]
+
+        def recover(point: np.ndarray, tri: tuple[int, int, int]):
+            cp = vp @ np.append(point, 1.0)
+            pn = cp[:3] / cp[3]
+            a = np.array(
+                [
+                    [ndc[t, 0] for t in tri],
+                    [ndc[t, 1] for t in tri],
+                    [1.0, 1.0, 1.0],
+                ]
+            )
+            lam = np.linalg.solve(a, np.array([pn[0], pn[1], 1.0]))
+            if (lam < -1e-9).any():
+                return None
+            num = sum(lam[n] * strip[t] / clip[t, 3] for n, t in enumerate(tri))
+            den = sum(lam[n] / clip[t, 3] for n, t in enumerate(tri))
+            h = num / den
+            return h[:3] / h[3]
+
+        for point in (
+            np.array([5.0, -1.0, 0.0]),
+            np.array([-20.0, -1.0, -100.0]),
+            np.array([150.0, -1.0, -800.0]),
+        ):
+            got = recover(point, (0, 1, 2))
+            if got is None:
+                got = recover(point, (1, 3, 2))
+            self.assertIsNotNone(got)
+            np.testing.assert_allclose(got, point, atol=1e-6)
+
+    def test_hole_plane_alternates_rim_and_horizon(self):
+        strip = planes.hole_plane_strip(100.0, 200.0, 0.5)
+        self.assertEqual(strip.shape, (26, 4))  # 13 pairs, loop closed
+        np.testing.assert_allclose(strip[::2, 3], np.ones(13))   # rim, w = 1
+        np.testing.assert_allclose(strip[1::2, 3], np.zeros(13))  # horizon
+        for row in strip[::2]:
+            r = math.hypot(row[0] - 100.0, row[2] - 200.0)
+            self.assertAlmostEqual(r, planes.HOLE_RADIUS, delta=1e-3)
+            self.assertAlmostEqual(row[1], 0.5)
+        # Each horizon vertex points in its rim vertex's azimuth.
+        for rim, hor in zip(strip[::2], strip[1::2]):
+            d = np.array([rim[0] - 100.0, rim[2] - 200.0])
+            d /= np.linalg.norm(d)
+            np.testing.assert_allclose([hor[0], hor[2]], d, atol=1e-6)
+
+
+if __name__ == "__main__":
+    unittest.main()
