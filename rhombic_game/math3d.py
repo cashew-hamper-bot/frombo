@@ -60,68 +60,42 @@ def ray_direction(vp_inverse: np.ndarray, ndc_x: float, ndc_y: float) -> np.ndar
     return d / np.linalg.norm(d)
 
 
-def drag_glue(
-    camera: "Camera",
-    fov_y_rad: float,
-    aspect: float,
-    near: float,
-    ndc_old: tuple[float, float],
-    ndc_new: tuple[float, float],
-) -> None:
-    """Rotate the camera so the grabbed world direction stays grabbed.
+def look_delta(
+    pitch: float,
+    x: float,
+    y: float,
+    dx: float,
+    dy: float,
+    k: float,
+) -> tuple[float, float]:
+    """One grab-the-world look step, from the analytic Jacobian.
 
-    Closed form, no iteration.  Write the new cursor ray in camera
-    space as v = (ndc.x * tan(fovx/2), ndc.y * tan(fovy/2), -1); the
-    camera must satisfy Ry(yaw') Rx(pitch') v = |v| * target.
+    ``x``, ``y`` are the cursor's camera-space ray coordinates
+    (``X = aspect * tan(fovY/2) * ndc_x``, ``Y = tan(fovY/2) *
+    ndc_y``), ``dx``, ``dy`` the cursor motion in pixels, and
+    ``k = 2 * tan(fovY/2) / height_px`` the shared pixel scale
+    (precomputed in resizeGL).  Returns ``(dyaw, dpitch)`` in
+    grab sense: the rotation that keeps the world direction
+    under the cursor glued to it.  Derivation:
+    docs/look-jacobian.md.
 
-    - Rx preserves the x component, so with w = Ry(-yaw') target we
-      need w.x = v.x / |v|.  w.x as a function of yaw' is a sinusoid
-      of amplitude rho = the target's horizontal magnitude, giving
-      yaw' = delta +/- acos(vx_hat / rho); of the two solutions, take
-      the one nearer the current (yaw, pitch).
-    - Then pitch' rotates v's (y, z) components onto w's: pitch' is
-      the difference of their atan2 angles.
-
-    Exact (to ~1e-6 degrees, stress-tested) whenever a solution
-    exists.  The one impossible geometry for a yaw/pitch camera: a
-    near-vertical target (|vx_hat| > rho -- looking almost straight
-    up or down with the cursor off to the side) would need roll;
-    there the acos clamps and the formula returns the closest yaw.
-
-    History: v1 recomputed the target after rotating (applied the
-    step twice, ~2x drag); v2 fixed that but refined with Newton
-    iterations; this closed form replaces the loop.
+    The only singularity is ``sigma = cos(pitch) - sin(pitch)*Y
+    = 0`` -- the cursor ray parallel to the world Y axis, where
+    yaw cannot move the grabbed point; sigma is clamped to
+    ``|sigma| >= 0.10`` so gains stay bounded there.
     """
-    inv = np.linalg.inv(camera.view_projection(fov_y_rad, aspect, near))
-    target = ray_direction(inv, *ndc_old)
-    ty = math.tan(fov_y_rad / 2.0)
-    v = np.array([ndc_new[0] * ty * aspect, ndc_new[1] * ty, -1.0])
-    vx_hat = float(v[0] / np.linalg.norm(v))
-    dx, dz = float(target[0]), float(target[2])
-    rho = math.hypot(dx, dz)
-    solutions: list[tuple[float, float]] = []
-    if rho < 1e-9:
-        yaws = [camera.yaw]
-    else:
-        delta = math.atan2(-dz, dx)
-        off = math.acos(max(-1.0, min(1.0, vx_hat / rho)))
-        yaws = [delta + off, delta - off]
-    for yaw_new in yaws:
-        cy, sy = math.cos(yaw_new), math.sin(yaw_new)
-        w = np.array(
-            [cy * dx - sy * dz, float(target[1]), sy * dx + cy * dz]
-        )
-        pitch_new = math.atan2(float(w[2]), float(w[1])) - math.atan2(-1.0, float(v[1]))
-        pitch_new = (pitch_new + math.pi) % (2.0 * math.pi) - math.pi
-        solutions.append((yaw_new, pitch_new))
-
-    def _dist(sol: tuple[float, float]) -> float:
-        dyaw = (sol[0] - camera.yaw + math.pi) % (2.0 * math.pi) - math.pi
-        return abs(dyaw) + abs(sol[1] - camera.pitch)
-
-    yaw_new, pitch_new = min(solutions, key=_dist)
-    camera.yaw = float(yaw_new)
-    camera.pitch = float(np.clip(pitch_new, -1.55, 1.55))
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    lam2 = 1.0 + x * x + y * y
+    sigma = cp - sp * y
+    if abs(sigma) < 0.10:
+        sigma = 0.10 if sigma >= 0.0 else -0.10
+    denom = lam2 * sigma
+    dyaw = k * ((1.0 + y * y) * dx + x * y * dy) / denom
+    dpitch = k * (
+        x * (sp + cp * y) * dx + (cp * (1.0 + x * x) - sp * y) * dy
+    ) / denom
+    return dyaw, dpitch
 
 
 def rotation_yaw_pitch(yaw: float, pitch: float) -> np.ndarray:

@@ -39,9 +39,12 @@ from .lattice import (
     island_cells_100,
     island_cells_111,
 )
-from .math3d import Camera, drag_glue
+from .math3d import Camera, look_delta
 
 FOV_Y = math.radians(70.0)
+# The projection never changes, so its one derived constant for
+# the look Jacobian is computed once, here (docs/look-jacobian.md).
+TAN_HALF_FOV = math.tan(FOV_Y / 2.0)
 NEAR = 0.1
 
 
@@ -104,6 +107,7 @@ class RDWidget(QOpenGLWidget):
         self.camera = Camera()
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
+        self._look_size = None  # (w, h) cached by resizeGL for look math
         self._captured = False  # Minecraft-like mouse capture (FPS look)
         self._last_global = None  # last pointer global pos (capture)
         self._look_pending = [0.0, 0.0]  # captured deltas awaiting a frame
@@ -364,23 +368,41 @@ class RDWidget(QOpenGLWidget):
         if np.any(move):
             cam.position = cam.position + move * (cam.move_speed * self._boost * dt)
 
+    def _look_params(self) -> tuple[float, float, float]:
+        """(width, height, pixel scale k) for the look Jacobian.
+
+        Cached by resizeGL; falls back to the live widget size if
+        no resize has been delivered yet.
+        """
+        if self._look_size is not None:
+            w, h = self._look_size
+        else:
+            w, h = max(1.0, float(self.width())), max(1.0, float(self.height()))
+        return w, h, 2.0 * TAN_HALF_FOV / h
+
+    def resizeGL(self, w: int, h: int) -> None:
+        # Everything the look math needs that depends on the
+        # screen size is precomputed here, once per resize --
+        # never per mouse event (docs/look-jacobian.md).
+        self._look_size = (max(1.0, float(w)), max(1.0, float(h)))
+        super().resizeGL(w, h)
+
     def _apply_pending_look(self) -> None:
         """Apply the frame's accumulated captured-mouse rotation.
 
-        Same angular scale as grab-the-world drag at the screen
-        centre, FPS sense -- but integrated once per frame, like
-        WASD translation, instead of per mouse event.
+        The look Jacobian at the screen centre (where the warped
+        cursor lives), FPS sense, integrated once per frame like
+        WASD translation.
         """
         dx, dy = self._look_pending
         if dx == 0.0 and dy == 0.0:
             return
         self._look_pending = [0.0, 0.0]
-        w = max(1.0, float(self.width()))
-        h = max(1.0, float(self.height()))
-        tan_y = math.tan(FOV_Y / 2.0)
-        self.camera.yaw -= dx * (2.0 * tan_y * (w / h) / w)
+        _, _, k = self._look_params()
+        dyaw, dpitch = look_delta(self.camera.pitch, 0.0, 0.0, dx, dy, k)
+        self.camera.yaw -= dyaw
         self.camera.pitch = float(
-            np.clip(self.camera.pitch - dy * (2.0 * tan_y / h), -1.55, 1.55)
+            np.clip(self.camera.pitch - dpitch, -1.55, 1.55)
         )
 
     def paintGL(self) -> None:
@@ -530,27 +552,6 @@ class RDWidget(QOpenGLWidget):
         self.setFocus()
         super().mousePressEvent(event)
 
-    def _drag_glue(self, new_pos) -> None:
-        """Grab-the-world dragging with exact 1:1 tracking at infinity.
-
-        The scene follows the cursor, as in panorama viewers and map
-        apps (the opposite sense from FPS mouse-look).  Rather than a
-        fixed radians-per-pixel rate, each motion event rotates the
-        camera by the exact rotation that carries the world direction
-        currently under the cursor onto the direction that was under
-        the cursor at the previous event -- so an object at infinity
-        stays glued to the pointer at any screen position, centre or
-        edge.  Two passes: the second mops up the sub-pixel residue
-        of projecting the rotation back onto yaw/pitch.
-        """
-        w = max(1.0, float(self.width()))
-        h = max(1.0, float(self.height()))
-
-        def ndc(p):
-            return (2.0 * p.x() / w - 1.0, 1.0 - 2.0 * p.y() / h)
-
-        drag_glue(self.camera, FOV_Y, w / h, NEAR, ndc(self._last_mouse), ndc(new_pos))
-
     def mouseMoveEvent(self, event) -> None:
         if self._captured:
             # Accumulate deltas; the rotation is applied once per
@@ -578,7 +579,23 @@ class RDWidget(QOpenGLWidget):
         if self._last_mouse is not None and (
             event.buttons() & Qt.MouseButton.LeftButton
         ):
-            self._drag_glue(event.position())
+            # Grab-the-world drag via the analytic look Jacobian
+            # (docs/look-jacobian.md): the world direction under
+            # the cursor stays glued to it, at any screen position.
+            pos = event.position()
+            dx = float(pos.x() - self._last_mouse.x())
+            dy = float(pos.y() - self._last_mouse.y())
+            if dx != 0.0 or dy != 0.0:
+                w, h, k = self._look_params()
+                x = (w / h) * TAN_HALF_FOV * (2.0 * float(pos.x()) / w - 1.0)
+                y = TAN_HALF_FOV * (1.0 - 2.0 * float(pos.y()) / h)
+                dyaw, dpitch = look_delta(
+                    self.camera.pitch, x, y, dx, dy, k
+                )
+                self.camera.yaw += dyaw
+                self.camera.pitch = float(
+                    np.clip(self.camera.pitch + dpitch, -1.55, 1.55)
+                )
         self._last_mouse = event.position()
         super().mouseMoveEvent(event)
 
