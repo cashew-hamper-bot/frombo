@@ -19,7 +19,7 @@ from rhombic_game.lattice import (
     cell_mesh,
     rd_faces,
 )
-from rhombic_game.math3d import Camera, drag_glue, perspective_infinite, ray_direction
+from rhombic_game.math3d import Camera, look_delta, perspective_infinite, ray_direction
 
 
 def ndc(m: np.ndarray, p: np.ndarray) -> np.ndarray:
@@ -340,34 +340,69 @@ class WallTests(unittest.TestCase):
             self.assertLessEqual(dist, 0.72)
 
 
-class DragGlueTests(unittest.TestCase):
+class LookDeltaTests(unittest.TestCase):
+    """The analytic look Jacobian (docs/look-jacobian.md)."""
+
+    FOV = 1.1
+    ASPECT = 1.6
+    H = 800.0
+
+    def _k(self):
+        return 2.0 * math.tan(self.FOV / 2.0) / self.H
+
+    def _xy(self, ndc_x, ndc_y):
+        t = math.tan(self.FOV / 2.0)
+        return self.ASPECT * t * ndc_x, t * ndc_y
+
+    def _glue_error_deg(self, cam, ndc_old, ndc_new, steps=40):
+        """Drag in small steps; return the glued direction's drift."""
+        inv = np.linalg.inv(cam.view_projection(self.FOV, self.ASPECT, 0.1))
+        target = ray_direction(inv, *ndc_old)
+        for s in range(1, steps + 1):
+            f = s / steps
+            ndc = (
+                ndc_old[0] + (ndc_new[0] - ndc_old[0]) * f,
+                ndc_old[1] + (ndc_new[1] - ndc_old[1]) * f,
+            )
+            prev = (
+                ndc_old[0] + (ndc_new[0] - ndc_old[0]) * (f - 1.0 / steps),
+                ndc_old[1] + (ndc_new[1] - ndc_old[1]) * (f - 1.0 / steps),
+            )
+            # Pixel motion of this sub-step on an ASPECT x 1 screen
+            # of height H: dx = d(ndc_x) * W/2, dy = -d(ndc_y) * H/2.
+            dx = (ndc[0] - prev[0]) * (self.ASPECT * self.H) / 2.0
+            dy = -(ndc[1] - prev[1]) * self.H / 2.0
+            x, y = self._xy(*ndc)
+            dyaw, dpitch = look_delta(cam.pitch, x, y, dx, dy, self._k())
+            cam.yaw += dyaw
+            cam.pitch = float(np.clip(cam.pitch + dpitch, -1.55, 1.55))
+        inv2 = np.linalg.inv(cam.view_projection(self.FOV, self.ASPECT, 0.1))
+        got = ray_direction(inv2, *ndc_new)
+        return math.degrees(math.acos(float(np.clip(got @ target, -1, 1))))
+
+    def test_centre_rates(self):
+        k = self._k()
+        dyaw, dpitch = look_delta(0.0, 0.0, 0.0, 10.0, 4.0, k)
+        self.assertAlmostEqual(dyaw, k * 10.0)
+        self.assertAlmostEqual(dpitch, k * 4.0)
+        # Pitched: yaw gains 1/cos(pitch) at the centre, pitch rate same.
+        dyaw, dpitch = look_delta(0.6, 0.0, 0.0, 10.0, 4.0, k)
+        self.assertAlmostEqual(dyaw, k * 10.0 / math.cos(0.6))
+        self.assertAlmostEqual(dpitch, k * 4.0)
+
     def test_grabbed_direction_stays_under_cursor(self):
         cam = Camera()
         cam.yaw, cam.pitch = 0.7, -0.3
-        fov, aspect, near = 1.1, 1.6, 0.1
-        ndc_old, ndc_new = (0.10, 0.05), (0.38, -0.12)
-        inv = np.linalg.inv(cam.view_projection(fov, aspect, near))
-        target = ray_direction(inv, *ndc_old)
-        drag_glue(cam, fov, aspect, near, ndc_old, ndc_new)
-        inv2 = np.linalg.inv(cam.view_projection(fov, aspect, near))
-        np.testing.assert_allclose(ray_direction(inv2, *ndc_new), target, atol=1e-6)
+        err = self._glue_error_deg(cam, (0.10, 0.05), (0.38, -0.12))
+        self.assertLess(err, 0.05)  # second-order residue only
 
-    def test_near_nadir_degrades_gracefully(self):
-        # Looking almost straight down with the cursor off to the
-        # side is the one geometry a yaw/pitch camera cannot glue
-        # exactly (it would need roll).  The closed form must still
-        # land within a couple of degrees, not diverge.
-        cam = Camera()
-        cam.yaw, cam.pitch = 0.3, -1.50
-        fov, aspect, near = 1.1, 1.6, 0.1
-        ndc_old, ndc_new = (0.0, -0.2), (0.08, -0.2)  # one realistic step
-        inv = np.linalg.inv(cam.view_projection(fov, aspect, near))
-        target = ray_direction(inv, *ndc_old)
-        drag_glue(cam, fov, aspect, near, ndc_old, ndc_new)
-        inv2 = np.linalg.inv(cam.view_projection(fov, aspect, near))
-        got = ray_direction(inv2, *ndc_new)
-        err_deg = math.degrees(math.acos(float(np.clip(got @ target, -1, 1))))
-        self.assertLess(err_deg, 3.0)
+    def test_singular_band_stays_bounded(self):
+        # Pitch near vertical, cursor ray near the Y axis:
+        # sigma -> 0 is clamped, deltas must stay finite and sane.
+        dyaw, dpitch = look_delta(1.50, 0.0, 0.30, 5.0, 5.0, self._k())
+        self.assertTrue(math.isfinite(dyaw) and math.isfinite(dpitch))
+        self.assertLess(abs(dyaw), 0.5)
+        self.assertLess(abs(dpitch), 0.5)
 
 
 class Wall100BAndColumnTests(unittest.TestCase):
