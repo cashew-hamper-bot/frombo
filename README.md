@@ -71,6 +71,24 @@ measures interaction smoothness directly: per-frame rotation
 increments for synthetic event streams, and glued-point drift
 over a drag.
 
+## Performance harness
+
+`tools/perf_harness.py` times `paintGL` directly — wall clock
+around the call plus `glFinish`, measured from outside the app,
+so no timers are added to the app for its sake — across camera
+scenarios (ground, altitude, steep-down) and feature toggles.
+The toggles use a small instrumentation hook in the widget,
+`disabled_passes`: naming a pass (`sky`, `blocks`, `bedrock`,
+`sea`) skips it for a frame, so each pass's cost is the delta
+from the matching baseline. Flat-vs-smooth shading and an
+all-passes-off "bare" floor (clear + present) are included, and
+`--samples N` selects the MSAA level. First software-GL
+readings (relative costs are the signal; absolute numbers on a
+real GPU will differ): at ground level the blocks and bedrock
+are the top costs, at altitude the two planes dominate, looking
+steeply down is nearly all bedrock, and 4x MSAA roughly doubles
+the frame cost in software rendering.
+
 Running from an IDE: the canonical entry is `python -m rhombic_game`
 from the project root. To run a file directly (e.g. PyCharm's Run
 button), run `run.py` at the project root, or make a run
