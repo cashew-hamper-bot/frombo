@@ -108,6 +108,11 @@ class RDWidget(QOpenGLWidget):
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._look_size = None  # (w, h) cached by resizeGL for look math
+        # Instrumentation for tools/perf_harness.py: names of
+        # paintGL passes to skip ("sky", "blocks", "bedrock",
+        # "sea").  Empty in normal use; costs one membership
+        # test per pass per frame.
+        self.disabled_passes: frozenset = frozenset()
         self._captured = False  # Minecraft-like mouse capture (FPS look)
         self._last_global = None  # last pointer global pos (capture)
         self._look_pending = [0.0, 0.0]  # captured deltas awaiting a frame
@@ -423,75 +428,79 @@ class RDWidget(QOpenGLWidget):
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         gl.glDisable(gl.GL_CULL_FACE)
 
-        # 1. Sky at infinity: depth exactly 1.0, drawn first, no depth write.
-        gl.glDepthMask(gl.GL_FALSE)
-        gl.glDepthFunc(gl.GL_LEQUAL)
-        gl.glUseProgram(self._sky_prog)
-        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sky_prog, "uVP"), 1, gl.GL_TRUE, vp)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._sky_prog, "uSunDir"), 1, sun)
-        # (The matching `under` factor is computed with the haze
-        # colour above; the sky palette fades over the same range.)
-        gl.glUniform1f(gl.glGetUniformLocation(self._sky_prog, "uUnder"), under)
-        gl.glBindVertexArray(self._sky_vao)
-        gl.glDrawElements(gl.GL_TRIANGLES, self._sky_count, gl.GL_UNSIGNED_INT, None)
-        gl.glBindVertexArray(0)
-        gl.glDepthMask(gl.GL_TRUE)
-        gl.glDepthFunc(gl.GL_LESS)
+        if "sky" not in self.disabled_passes:
+            # 1. Sky at infinity: depth exactly 1.0, drawn first, no depth write.
+            gl.glDepthMask(gl.GL_FALSE)
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glUseProgram(self._sky_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sky_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sky_prog, "uSunDir"), 1, sun)
+            # (The matching `under` factor is computed with the haze
+            # colour above; the sky palette fades over the same range.)
+            gl.glUniform1f(gl.glGetUniformLocation(self._sky_prog, "uUnder"), under)
+            gl.glBindVertexArray(self._sky_vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, self._sky_count, gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthMask(gl.GL_TRUE)
+            gl.glDepthFunc(gl.GL_LESS)
 
-        # 2. Local RD ground.
-        gl.glUseProgram(self._block_prog)
-        gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
-        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
-        for vao, count in self._patches:
-            gl.glBindVertexArray(vao)
-            gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
-        gl.glBindVertexArray(0)
+        if "blocks" not in self.disabled_passes:
+            # 2. Local RD ground.
+            gl.glUseProgram(self._block_prog)
+            gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
+            for vao, count in self._patches:
+                gl.glBindVertexArray(vao)
+                gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
 
-        # 3. Complete infinite bedrock plane (4 vertices).
-        self._bedrock.upload(
-            planes.full_plane_strip(
-                cam.position[0],
-                cam.position[2],
-                planes.BEDROCK_Y,
-                cam.forward_xz(),
-                height=float(cam.position[1] - planes.BEDROCK_Y),
+        if "bedrock" not in self.disabled_passes:
+            # 3. Complete infinite bedrock plane (4 vertices).
+            self._bedrock.upload(
+                planes.full_plane_strip(
+                    cam.position[0],
+                    cam.position[2],
+                    planes.BEDROCK_Y,
+                    cam.forward_xz(),
+                    height=float(cam.position[1] - planes.BEDROCK_Y),
+                )
             )
-        )
-        gl.glUseProgram(self._bedrock_prog)
-        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
-        gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
-        gl.glActiveTexture(gl.GL_TEXTURE1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
-        gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uNoise"), 1)
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        self._bedrock.draw()
+            gl.glUseProgram(self._bedrock_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
+            gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
+            gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uNoise"), 1)
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            self._bedrock.draw()
 
-        # 4. Infinite sea plane with the hole around the player.
-        self._sea.upload(
-            planes.hole_plane_strip(cam.position[0], cam.position[2], planes.SEA_Y)
-        )
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        gl.glDepthMask(gl.GL_FALSE)
-        gl.glUseProgram(self._sea_prog)
-        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
-        gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
-        gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
-        gl.glActiveTexture(gl.GL_TEXTURE1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
-        gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uNoise"), 1)
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        self._sea.draw()
-        gl.glDepthMask(gl.GL_TRUE)
-        gl.glDisable(gl.GL_BLEND)
+        if "sea" not in self.disabled_passes:
+            # 4. Infinite sea plane with the hole around the player.
+            self._sea.upload(
+                planes.hole_plane_strip(cam.position[0], cam.position[2], planes.SEA_Y)
+            )
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            gl.glDepthMask(gl.GL_FALSE)
+            gl.glUseProgram(self._sea_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
+            gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
+            gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uNoise"), 1)
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            self._sea.draw()
+            gl.glDepthMask(gl.GL_TRUE)
+            gl.glDisable(gl.GL_BLEND)
 
         self._frame += 1
         if self.on_hud is not None and self._frame % 6 == 0:
