@@ -43,7 +43,7 @@ Python ≥ 3.10. Controls:
 | I J K L | move (right hand — for left-mousers), same plane |
 | Space / E / U | up |
 | C / Q / O | down |
-| drag, primary mouse button | look, grab-the-world style, exact 1:1 tracking at infinity |
+| drag, primary mouse button | look, grab-the-world style, glued to the cursor at infinity |
 | click (press + release, no drag) | toggle Minecraft-like mouse capture: hidden cursor, FPS look at the same angular scale |
 | wheel | fly speed |
 | hold Shift | 10x speed boost while held (the HUD shows the boosted speed) |
@@ -54,18 +54,22 @@ Movement uses the view azimuth only — looking down and pressing W
 does not descend. Dragging uses the grab-the-world convention of
 panorama viewers and map apps, the opposite sense from FPS
 mouse-look: drag right pulls the world right, so the view turns
-left. It is also *exact*: each drag step rotates the camera by the
-rotation that carries the direction under the cursor onto the
-direction previously under it, so an object at infinity stays glued
-to the pointer at any screen position (no fixed radians-per-pixel
-rate — the same drag travels further at wide FOV edges than at the
-centre, as it should). The solve is a closed form (an acos for
-yaw, an atan2 difference for pitch; see `drag_glue` in
-`math3d.py`), exact whenever a yaw/pitch camera can glue the point
-at all -- the one impossible geometry is a near-vertical target
-with the cursor off to the side, which would need roll. Earlier
-versions re-aimed at a moving target (dragging ~2x too fast), then
-refined with Newton iterations; the formula replaces the loop.
+left. The rotation per event comes from the analytic Jacobian of
+the glued-cursor condition (`look_delta` in `math3d.py`;
+derivation in `docs/look-jacobian.md`): an object at infinity
+stays glued to the pointer at any screen position, with no fixed
+radians-per-pixel rate — the same drag travels further at wide
+FOV edges than at the centre, as it should. The Jacobian is exact
+in the limit, with second-order error per step (worst measured
+0.015 degrees at chunky 6 px steps); an earlier exact per-event
+solver (matrix inversion plus an acos branch pick per event)
+felt jerky next to frame-integrated translation and is gone.
+The one singularity is the cursor ray parallel to the world Y
+axis (zenith/nadir through an off-centre cursor), where the
+formula's sigma term is clamped. `tools/look_harness.py`
+measures interaction smoothness directly: per-frame rotation
+increments for synthetic event streams, and glued-point drift
+over a drag.
 
 Running from an IDE: the canonical entry is `python -m rhombic_game`
 from the project root. To run a file directly (e.g. PyCharm's Run
