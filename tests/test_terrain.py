@@ -46,6 +46,9 @@ class TerrainTests(unittest.TestCase):
         outer = verts[1::2]
         self.assertTrue(np.all(inner[:, 3] == 1.0))  # finite
         self.assertTrue(np.all(outer[:, 3] == 0.0))  # at infinity
+        # Infinity points lie exactly on the horizon: their
+        # direction is purely horizontal.
+        self.assertTrue(np.all(outer[:, 1] == 0.0))
         land = terrain.terrain_stats()["land_fraction"]
         np.testing.assert_allclose(outer[:, 7], land, atol=1e-6)
         self.assertTrue(np.all(inner[:, 7] == 1.0))
