@@ -106,6 +106,8 @@ class RDWidget(QOpenGLWidget):
         self.setMouseTracking(True)
         self.camera = Camera()
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
+        self._show_terrain = True  # distant terrain + horizon ring (T toggles)
+        self._show_sea = True  # ocean surface (Y toggles)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._look_size = None  # (w, h) cached by resizeGL for look math
         # Instrumentation for tools/perf_harness.py: names of
@@ -488,7 +490,12 @@ class RDWidget(QOpenGLWidget):
         sun = _sun()
         # Below bedrock the sky palette turns nether-red (the sky
         # shader's uUnder fade).  There is no haze anywhere to tint.
-        under = float(np.clip((planes.BEDROCK_Y - cam.position[1]) / 12.0, 0.0, 1.0))
+        # The bedrock plane is the boundary between worlds: the
+        # nether palette is essentially fully in force a metre
+        # below it (a 12 m fade read as "blue, reddening as you
+        # descend" from just underneath, which is wrong -- below
+        # is below).
+        under = float(np.clip((planes.BEDROCK_Y - cam.position[1]) / 1.0, 0.0, 1.0))
         cam_pos = cam.position.astype(np.float32)
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
@@ -526,7 +533,7 @@ class RDWidget(QOpenGLWidget):
             # 3. Complete infinite bedrock plane (4 vertices).
             self._draw_bedrock(vp, cam_pos)
 
-        if "terrain" not in self.disabled_passes:
+        if "terrain" not in self.disabled_passes and self._show_terrain:
             # 4. Distant terrain annulus (block program; uniforms
             # set here so the pass stands alone when "blocks" is
             # disabled by the perf harness).
@@ -540,7 +547,7 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawElements(gl.GL_TRIANGLES, tcount, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
 
-        if "terrain" not in self.disabled_passes:
+        if "terrain" not in self.disabled_passes and self._show_terrain:
             # 5. Terrain horizon ring at infinity: one uniform
             # statistical colour, identical at every azimuth
             # (each horizon point represents the whole disc),
@@ -561,7 +568,7 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDepthFunc(gl.GL_LESS)
 
-        if "sea" not in self.disabled_passes:
+        if "sea" not in self.disabled_passes and self._show_sea:
             # 6. The sea, drawn last of the infinity family
             # (slightly transparent; painter's order keeps the
             # blending simple).  LEQUAL so that at the horizon,
@@ -603,6 +610,10 @@ class RDWidget(QOpenGLWidget):
             p = cam.position
             boost = "  x10 BOOST" if self._boost > 1.0 else ""
             mode = "  MOUSE CAPTURED (Esc to release)" if self._captured else ""
+            if not self._show_terrain:
+                mode += "  [terrain off]"
+            if not self._show_sea:
+                mode += "  [sea off]"
             self.on_hud(
                 f"pos ({p[0]:7.1f}, {p[1]:6.1f}, {p[2]:7.1f})   "
                 f"speed {cam.move_speed * self._boost:5.1f} m/s{boost}   "
@@ -628,6 +639,12 @@ class RDWidget(QOpenGLWidget):
             return
         if event.key() == Qt.Key.Key_G and not event.isAutoRepeat():
             self._smooth = 0.0 if self._smooth else 1.0
+        if event.key() == Qt.Key.Key_T and not event.isAutoRepeat():
+            self._show_terrain = not self._show_terrain
+            self.update()
+        if event.key() == Qt.Key.Key_Y and not event.isAutoRepeat():
+            self._show_sea = not self._show_sea
+            self.update()
             self.update()
             return
         if not event.isAutoRepeat():
