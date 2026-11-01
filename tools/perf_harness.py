@@ -155,6 +155,7 @@ def main() -> int:
             times = run_cell(glw, app, args.frames, args.warmup)
             mean = statistics.fmean(times)
             med = statistics.median(times)
+            p10 = pct(times, 0.10)
             p95 = pct(times, 0.95)
             fps = len(times) * 1000.0 / sum(times)
             if base_mean is None:
@@ -163,7 +164,7 @@ def main() -> int:
             else:
                 delta = f"  delta {base_mean - mean:+7.2f} ms vs baseline"
             print(f"  {cfg_name:12s} mean {mean:7.2f} ms  median {med:7.2f}  "
-                  f"p95 {p95:7.2f}  ({fps:6.1f} fps){delta}")
+                  f"p10 {p10:7.2f}  p95 {p95:7.2f}  ({fps:6.1f} fps){delta}")
     glw.disabled_passes = frozenset()
     return 0
 
