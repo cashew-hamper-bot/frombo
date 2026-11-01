@@ -206,6 +206,16 @@ void main() {
     // flat minimum ambient term keeps the darkest vertices readable
     // (no global illumination is coming to save them).
     vec3 col = vColor * (hemi * (0.45 + 0.55 * vAO) + vec3(0.16) + sun * 0.95);
+    // Phong specular: per-pixel view vector against the reflected
+    // sun direction.  Sandy surfaces are matte, so the strength
+    // is low and the lobe broad -- a sheen on sun-facing facets
+    // at grazing view angles, not a wet look.  Gated by ndl so
+    // back faces never sparkle.
+    vec3 L = normalize(uSunDir);
+    vec3 V = normalize(uCamPos - vWorld);
+    vec3 R = reflect(-L, n);
+    float spec = pow(max(dot(R, V), 0.0), 28.0) * 0.22 * step(0.0, ndl);
+    col += vec3(1.0, 0.93, 0.80) * spec;
     fragColor = vec4(col, 1.0);
 }
 """

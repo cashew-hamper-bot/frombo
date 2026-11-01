@@ -224,9 +224,11 @@ def build_horizon_ring() -> tuple[np.ndarray, np.ndarray]:
 
     Vertex format: (aHomog vec4, aColor vec4) -- 8 floats.
     Inner vertices are finite (w = 1) with the terrain's own
-    colour and alpha 1; outer vertices are directions (w = 0)
-    carrying the mean terrain colour with opacity equal to the
-    land fraction, to be blended over the sea after it is drawn.
+    colour and alpha 1; outer vertices are purely horizontal
+    directions (w = 0, y = 0) -- points at infinity lie exactly
+    on the horizon line, never above it -- carrying the mean
+    terrain colour with opacity equal to the land fraction, to
+    be blended over the sea after it is drawn.
     """
     stats = terrain_stats()
     mean = stats["mean_colour"]
@@ -238,7 +240,7 @@ def build_horizon_ring() -> tuple[np.ndarray, np.ndarray]:
         h = height(x, z)
         c = colour_at(x, z)
         rows.append((x, h, z, 1.0, c[0], c[1], c[2], 1.0))
-        rows.append((x, h, z, 0.0, mean[0], mean[1], mean[2], land))
+        rows.append((x, 0.0, z, 0.0, mean[0], mean[1], mean[2], land))
     verts = np.array(rows, dtype=np.float32)
     idx = []
     for i in range(HORIZON_SEGMENTS):

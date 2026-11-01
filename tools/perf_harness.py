@@ -113,6 +113,11 @@ def main() -> int:
     ap.add_argument("--samples", type=int, default=4, help="MSAA samples")
     ap.add_argument("--frames", type=int, default=120)
     ap.add_argument("--warmup", type=int, default=20)
+    ap.add_argument("--swap-interval", type=int, default=0,
+                    help="0 disables vsync (default); 1 restores it. "
+                         "With vsync on, every cell saturates at the "
+                         "display period (16.7 ms at 60 Hz) and all "
+                         "pass costs hide underneath it.")
     args = ap.parse_args()
 
     fmt = QSurfaceFormat()
@@ -120,6 +125,7 @@ def main() -> int:
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setSamples(args.samples)
+    fmt.setSwapInterval(args.swap_interval)
     QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)
@@ -131,7 +137,8 @@ def main() -> int:
     cam = glw.camera
     spawn = (cam.position.copy(), cam.yaw, cam.pitch)
 
-    print(f"MSAA samples: {args.samples}; full-loop frames/cell: {args.frames} "
+    print(f"MSAA samples: {args.samples}; swap interval: {args.swap_interval}; "
+          f"full-loop frames/cell: {args.frames} "
           f"(+{args.warmup} warmup); window 1280x800")
     for scen_name, (pos, yaw, pitch) in SCENARIOS.items():
         print(f"\nscenario: {scen_name}")
