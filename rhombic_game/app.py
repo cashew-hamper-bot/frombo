@@ -25,12 +25,12 @@ import sys
 
 import numpy as np
 from OpenGL import GL as gl
-from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QPointF, Qt
 from PySide6.QtGui import QCursor, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 
-from . import planes, shaders
+from . import planes, shaders, terrain
 from .lattice import (
     DEFAULT_S,
     PATCH111_OFFSET,
@@ -110,8 +110,8 @@ class RDWidget(QOpenGLWidget):
         self._look_size = None  # (w, h) cached by resizeGL for look math
         # Instrumentation for tools/perf_harness.py: names of
         # paintGL passes to skip ("sky", "blocks", "bedrock",
-        # "sea").  Empty in normal use; costs one membership
-        # test per pass per frame.
+        # "sea", "terrain").  Empty in normal use; costs one
+        # membership test per pass per frame.
         self.disabled_passes: frozenset = frozenset()
         self._captured = False  # Minecraft-like mouse capture (FPS look)
         self._last_global = None  # last pointer global pos (capture)
@@ -122,9 +122,12 @@ class RDWidget(QOpenGLWidget):
         self._clock = QElapsedTimer()
         self.on_hud = None  # callable(str), set by the window
         self._frame = 0
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self.update)
-        self._timer.start(16)
+        # No repaint timer: frames are event-driven.  update() is
+        # called at the moment something changes the view -- a key
+        # or mouse event -- and paintGL re-requests one more frame
+        # only while movement keys remain held.  A metronome would
+        # insert its own jitter into that flow.  (The QElapsedTimer
+        # above schedules nothing; paintGL reads it for dt.)
 
     # -- GL setup -----------------------------------------------------
 
@@ -170,6 +173,27 @@ class RDWidget(QOpenGLWidget):
 
         self._bedrock = _DynamicStrip()
         self._sea = _DynamicStrip()
+
+        # Distant hex-lattice terrain (opaque annulus, drawn with
+        # the block program) and its statistical horizon ring
+        # (drawn last, blended over the sea).
+        self._terrain_vao = self._vao_from_mesh(*terrain.build_distant_terrain())
+        self._horizon_prog = _program(shaders.HORIZON_VERT, shaders.HORIZON_FRAG)
+        hverts, hidx = terrain.build_horizon_ring()
+        self._horizon_count = len(hidx)
+        self._horizon_vao = gl.glGenVertexArrays(1)
+        hvbo = gl.glGenBuffers(1)
+        hebo = gl.glGenBuffers(1)
+        gl.glBindVertexArray(self._horizon_vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, hvbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, hverts.nbytes, hverts, gl.GL_STATIC_DRAW)
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, hebo)
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, hidx.nbytes, hidx, gl.GL_STATIC_DRAW)
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, None)
+        gl.glEnableVertexAttribArray(1)
+        gl.glVertexAttribPointer(1, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, gl.GLvoidp(16))
+        gl.glBindVertexArray(0)
         self._clock.start()
 
     @staticmethod
@@ -479,6 +503,20 @@ class RDWidget(QOpenGLWidget):
             gl.glActiveTexture(gl.GL_TEXTURE0)
             self._bedrock.draw()
 
+        if "terrain" not in self.disabled_passes:
+            # 3b. Distant terrain annulus (block program; uniforms
+            # set here so the pass stands alone when "blocks" is
+            # disabled by the perf harness).
+            gl.glUseProgram(self._block_prog)
+            gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
+            tvao, tcount = self._terrain_vao
+            gl.glBindVertexArray(tvao)
+            gl.glDrawElements(gl.GL_TRIANGLES, tcount, gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+
         if "sea" not in self.disabled_passes:
             # 4. Infinite sea plane with the hole around the player.
             self._sea.upload(
@@ -502,6 +540,23 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDisable(gl.GL_BLEND)
 
+        if "terrain" not in self.disabled_passes:
+            # 5. Terrain horizon ring at infinity: mean terrain
+            # colour at land-fraction opacity, blended over the
+            # sea's horizon (drawn after the sea, at depth 1.0).
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            gl.glDepthMask(gl.GL_FALSE)
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glUseProgram(self._horizon_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glBindVertexArray(self._horizon_vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, self._horizon_count, gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthMask(gl.GL_TRUE)
+            gl.glDepthFunc(gl.GL_LESS)
+            gl.glDisable(gl.GL_BLEND)
+
         self._frame += 1
         if self.on_hud is not None and self._frame % 6 == 0:
             p = cam.position
@@ -512,6 +567,12 @@ class RDWidget(QOpenGLWidget):
                 f"speed {cam.move_speed * self._boost:5.1f} m/s{boost}   "
                 f"yaw {math.degrees(cam.yaw):6.1f} deg   pitch {math.degrees(cam.pitch):6.1f} deg{mode}"
             )
+
+        # Event-driven loop: while movement keys are held the
+        # viewpoint keeps changing, so request the next frame;
+        # otherwise stop here and wait for the next event.
+        if self._keys:
+            self.update()
 
     # -- input ----------------------------------------------------------
 
@@ -526,9 +587,11 @@ class RDWidget(QOpenGLWidget):
             return
         if event.key() == Qt.Key.Key_G and not event.isAutoRepeat():
             self._smooth = 0.0 if self._smooth else 1.0
+            self.update()
             return
         if not event.isAutoRepeat():
             self._keys.add(event.key())
+            self.update()
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event) -> None:
@@ -549,6 +612,7 @@ class RDWidget(QOpenGLWidget):
             self.releaseMouse()
             self.unsetCursor()
             self._last_global = None
+        self.update()
 
     def mousePressEvent(self, event) -> None:
         if self._captured:
@@ -583,6 +647,8 @@ class RDWidget(QOpenGLWidget):
                 self._last_global = center
             else:
                 self._last_global = pos
+            if self._look_pending[0] != 0.0 or self._look_pending[1] != 0.0:
+                self.update()
             super().mouseMoveEvent(event)
             return
         if self._last_mouse is not None and (
@@ -605,6 +671,7 @@ class RDWidget(QOpenGLWidget):
                 self.camera.pitch = float(
                     np.clip(self.camera.pitch + dpitch, -1.55, 1.55)
                 )
+                self.update()
         self._last_mouse = event.position()
         super().mouseMoveEvent(event)
 
@@ -628,6 +695,7 @@ class RDWidget(QOpenGLWidget):
         self.camera.move_speed = float(
             np.clip(self.camera.move_speed * (1.25**steps), 1.0, 240.0)
         )
+        self.update()  # the HUD speed readout changed
         super().wheelEvent(event)
 
 

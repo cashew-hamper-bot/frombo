@@ -209,3 +209,24 @@ void main() {
     fragColor = vec4(col, 1.0);
 }
 """
+
+HORIZON_VERT = """
+#version 330 core
+layout(location = 0) in vec4 aHomog;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uVP;
+out vec4 vColor;
+void main() {
+    vColor = aColor;
+    gl_Position = uVP * aHomog;
+}
+"""
+
+HORIZON_FRAG = """
+#version 330 core
+in vec4 vColor;
+out vec4 fragColor;
+void main() {
+    fragColor = vColor;
+}
+"""
