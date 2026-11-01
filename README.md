@@ -48,6 +48,8 @@ Python ≥ 3.10. Controls:
 | wheel | fly speed |
 | hold Shift | 10x speed boost while held (the HUD shows the boosted speed) |
 | G | toggle flat / Gouraud shading on the ground patch |
+| T | toggle the distant terrain (and its horizon ring) |
+| Y | toggle the ocean surface |
 | Esc | release mouse capture; press again (uncaptured) to quit |
 
 Movement uses the view azimuth only — looking down and pressing W
