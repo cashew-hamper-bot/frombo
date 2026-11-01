@@ -73,21 +73,23 @@ over a drag.
 
 ## Performance harness
 
-`tools/perf_harness.py` times `paintGL` directly — wall clock
-around the call plus `glFinish`, measured from outside the app,
-so no timers are added to the app for its sake — across camera
-scenarios (ground, altitude, steep-down) and feature toggles.
-The toggles use a small instrumentation hook in the widget,
-`disabled_passes`: naming a pass (`sky`, `blocks`, `bedrock`,
-`sea`) skips it for a frame, so each pass's cost is the delta
-from the matching baseline. Flat-vs-smooth shading and an
-all-passes-off "bare" floor (clear + present) are included, and
-`--samples N` selects the MSAA level. First software-GL
-readings (relative costs are the signal; absolute numbers on a
-real GPU will differ): at ground level the blocks and bedrock
-are the top costs, at altitude the two planes dominate, looking
-steeply down is nearly all bedrock, and 4x MSAA roughly doubles
-the frame cost in software rendering.
+`tools/perf_harness.py` times the *full loop*: each frame is a
+synthetic drag gesture delivered through the real event path,
+the `update()` it triggers, Qt's delivery of `paintGL`, and a
+`glFinish` — with the start and end timestamps on the lines
+immediately around that work, and FPS reported as frames over
+total loop time. Every gesture moves the viewpoint, so every
+render is of a changed scene. Configurations toggle passes via
+a small instrumentation hook in the widget, `disabled_passes`:
+naming a pass (`sky`, `blocks`, `bedrock`, `sea`, `terrain`)
+skips it, so each pass's cost is the delta from the matching
+baseline. Flat-vs-smooth shading and an all-passes-off "bare"
+floor are included, and `--samples N` selects the MSAA level.
+
+Rendering is event-driven: there is no repaint timer. A frame
+happens when a key or mouse event changes the viewpoint (and,
+while movement keys are held, `paintGL` requests the next one);
+an idle window renders nothing.
 
 Running from an IDE: the canonical entry is `python -m rhombic_game`
 from the project root. To run a file directly (e.g. PyCharm's Run
@@ -140,9 +142,9 @@ out, and there is no giant finite quad to clip or z-fight.
   filtering. The grid lines are gated by footprint too: a line
   pattern sampled below its own period aliases into moiré bands no
   matter how it is faded by distance, so lines now vanish once their
-  cells go sub-pixel. Both planes haze out to the *same* colour the
-  skybox uses at the horizon, so plane and sky meet without a seam
-  band.
+  cells go sub-pixel. (An earlier draft hazed the planes toward
+  the sky's horizon colour; haze was removed entirely — see the
+  design rule in `shaders.py`.)
 - The **sea plane** (y = −10, about 10 m below the terrain layer)
   has the hole: its strip walks once
   around the player — 12 finite rim vertices on a 500 m-radius
@@ -151,6 +153,16 @@ out, and there is no giant finite quad to clip or z-fight.
   alternating w = 1, 0, 1, 0, …). The rim follows the player's XZ, so
   the hole travels with the player while the plane still reaches the
   horizon in every direction.
+- The **distant terrain** (`terrain.py`) puts elevation into the
+  far field: hexagonal cells (500 m circumradius) in an annulus
+  from a 1.5 km hole out to 10 km, with heights from value noise
+  whose nodes sit on the triangular lattice — the hex tiling's
+  own vertex lattice. Beyond 10 km a horizon ring at infinity
+  carries the mean terrain colour at an opacity equal to the
+  sampled land fraction (the mean elevation is above sea level,
+  so the terrain ring is the transparent one, drawn after the
+  sea); about 24% of the disc samples below sea level. Distant
+  Horizons' default is 256 chunks (~4 km) for comparison.
 
 ## The local ground
 
