@@ -157,12 +157,21 @@ out, and there is no giant finite quad to clip or z-fight.
   far field: hexagonal cells (500 m circumradius) in an annulus
   from a 1.5 km hole out to 10 km, with heights from value noise
   whose nodes sit on the triangular lattice — the hex tiling's
-  own vertex lattice. Beyond 10 km a horizon ring at infinity
-  carries the mean terrain colour at an opacity equal to the
-  sampled land fraction (the mean elevation is above sea level,
-  so the terrain ring is the transparent one, drawn after the
-  sea); about 24% of the disc samples below sea level. Distant
-  Horizons' default is 256 chunks (~4 km) for comparison.
+  own vertex lattice. The disc is ocean-dominated like Earth's:
+  the sampled land fraction is 0.40 and the median elevation is
+  below sea level. Beyond 10 km a horizon ring at infinity
+  carries one uniform colour — the mean terrain colour lit as if
+  its normal were straight up — identical at every azimuth,
+  because each horizon point represents the whole disc; the sea
+  is the transparent partner there, its alpha fading at the
+  horizon to sea fraction × base opacity, and it is drawn last.
+  The whole infinity family (sky, bedrock, ring, sea) writes no
+  depth and tests `LEQUAL`: near the horizon their depths tie
+  asymptotically, so painter's order decides. Below bedrock,
+  the bedrock is drawn again last. Distant Horizons' default is
+  256 chunks (~4 km) for comparison. A sparse critical-point
+  representation of the terrain is sketched in
+  `docs/sparse-terrain.md`.
 
 ## The local ground
 

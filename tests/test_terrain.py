@@ -18,12 +18,11 @@ class TerrainTests(unittest.TestCase):
 
     def test_stats(self):
         s = terrain.terrain_stats()
-        # Mean elevation is pinned above sea level by construction.
-        self.assertAlmostEqual(s["mean_elevation"], terrain.TARGET_MEAN_ELEVATION)
-        self.assertGreater(s["mean_elevation"], SEA_Y)
-        # A real coastline: some sea, mostly land.
-        self.assertGreater(s["sea_fraction"], 0.05)
-        self.assertLess(s["sea_fraction"], 0.60)
+        # Ocean-dominated, like Earth: the land fraction is the
+        # target, and the median elevation is below sea level.
+        self.assertAlmostEqual(
+            s["land_fraction"], terrain.TARGET_LAND_FRACTION, delta=0.03)
+        self.assertLess(s["median_elevation"], SEA_Y)
         self.assertAlmostEqual(s["land_fraction"], 1.0 - s["sea_fraction"])
 
     def test_mesh_annulus_bounds(self):
@@ -49,9 +48,16 @@ class TerrainTests(unittest.TestCase):
         # Infinity points lie exactly on the horizon: their
         # direction is purely horizontal.
         self.assertTrue(np.all(outer[:, 1] == 0.0))
-        land = terrain.terrain_stats()["land_fraction"]
-        np.testing.assert_allclose(outer[:, 7], land, atol=1e-6)
-        self.assertTrue(np.all(inner[:, 7] == 1.0))
+        # The ring is opaque now (the sea carries the horizon
+        # mixture), and every vertex carries the one uniform
+        # lit-mean colour: horizon points are identical except
+        # for azimuth.
+        self.assertTrue(np.all(verts[:, 7] == 1.0))
+        lit = terrain.terrain_stats()["mean_lit_colour"]
+        # Uniform across all vertices, and equal to the lit mean.
+        self.assertEqual(float(np.abs(verts[:, 4:7] - verts[0, 4:7]).max()), 0.0)
+        np.testing.assert_allclose(
+            verts[0, 4:7], np.array(lit, dtype=np.float32), atol=1e-6)
         r = np.hypot(inner[:, 0], inner[:, 2])
         np.testing.assert_allclose(r, terrain.OUTER_RADIUS, atol=1.0)
 

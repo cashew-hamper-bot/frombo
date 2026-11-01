@@ -178,6 +178,9 @@ class RDWidget(QOpenGLWidget):
         # the block program) and its statistical horizon ring
         # (drawn last, blended over the sea).
         self._terrain_vao = self._vao_from_mesh(*terrain.build_distant_terrain())
+        # The sea's horizon opacity: sea fraction of the disc x
+        # the sea's base opacity (0.86); see the sea shader.
+        self._sea_horizon_alpha = terrain.terrain_stats()["sea_fraction"] * 0.86
         self._horizon_prog = _program(shaders.HORIZON_VERT, shaders.HORIZON_FRAG)
         hverts, hidx = terrain.build_horizon_ring()
         self._horizon_count = len(hidx)
@@ -434,6 +437,45 @@ class RDWidget(QOpenGLWidget):
             np.clip(self.camera.pitch - dpitch, -1.55, 1.55)
         )
 
+    def _draw_bedrock(self, vp, cam_pos) -> None:
+        """The complete infinite bedrock plane (4 vertices).
+
+        Like every member of the infinity family, it writes no
+        depth and tests LEQUAL: near the horizon, all these
+        surfaces' depths tie asymptotically within a few depth
+        quanta of 1.0 (a deep horizon ring skirt can even lose
+        to the bedrock's far field by ~1e-7 and get bitten out
+        in slabs), so painter's order -- sky, bedrock, terrain,
+        ring, sea -- must decide, not the depth buffer.  The
+        finite geometry (blocks, terrain mesh) still writes
+        depth and occludes them normally.
+        """
+        cam = self.camera
+        self._bedrock.upload(
+            planes.full_plane_strip(
+                cam.position[0],
+                cam.position[2],
+                planes.BEDROCK_Y,
+                cam.forward_xz(),
+                height=float(cam.position[1] - planes.BEDROCK_Y),
+            )
+        )
+        gl.glDepthFunc(gl.GL_LEQUAL)
+        gl.glDepthMask(gl.GL_FALSE)
+        gl.glUseProgram(self._bedrock_prog)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
+        gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
+        gl.glActiveTexture(gl.GL_TEXTURE1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
+        gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uNoise"), 1)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        self._bedrock.draw()
+        gl.glDepthMask(gl.GL_TRUE)
+        gl.glDepthFunc(gl.GL_LESS)
+
     def paintGL(self) -> None:
         dt = min(self._clock.restart() / 1000.0, 0.05)
         self._apply_pending_look()
@@ -482,29 +524,10 @@ class RDWidget(QOpenGLWidget):
 
         if "bedrock" not in self.disabled_passes:
             # 3. Complete infinite bedrock plane (4 vertices).
-            self._bedrock.upload(
-                planes.full_plane_strip(
-                    cam.position[0],
-                    cam.position[2],
-                    planes.BEDROCK_Y,
-                    cam.forward_xz(),
-                    height=float(cam.position[1] - planes.BEDROCK_Y),
-                )
-            )
-            gl.glUseProgram(self._bedrock_prog)
-            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
-            gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
-            gl.glActiveTexture(gl.GL_TEXTURE1)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
-            gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uNoise"), 1)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            self._bedrock.draw()
+            self._draw_bedrock(vp, cam_pos)
 
         if "terrain" not in self.disabled_passes:
-            # 3b. Distant terrain annulus (block program; uniforms
+            # 4. Distant terrain annulus (block program; uniforms
             # set here so the pass stands alone when "blocks" is
             # disabled by the perf harness).
             gl.glUseProgram(self._block_prog)
@@ -517,35 +540,17 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawElements(gl.GL_TRIANGLES, tcount, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
 
-        if "sea" not in self.disabled_passes:
-            # 4. Infinite sea plane with the hole around the player.
-            self._sea.upload(
-                planes.hole_plane_strip(cam.position[0], cam.position[2], planes.SEA_Y)
-            )
-            gl.glEnable(gl.GL_BLEND)
-            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-            gl.glDepthMask(gl.GL_FALSE)
-            gl.glUseProgram(self._sea_prog)
-            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
-            gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
-            gl.glActiveTexture(gl.GL_TEXTURE1)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
-            gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uNoise"), 1)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            self._sea.draw()
-            gl.glDepthMask(gl.GL_TRUE)
-            gl.glDisable(gl.GL_BLEND)
-
         if "terrain" not in self.disabled_passes:
-            # 5. Terrain horizon ring at infinity: mean terrain
-            # colour at land-fraction opacity, blended over the
-            # sea's horizon (drawn after the sea, at depth 1.0).
-            gl.glEnable(gl.GL_BLEND)
-            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            # 5. Terrain horizon ring at infinity: one uniform
+            # statistical colour, identical at every azimuth
+            # (each horizon point represents the whole disc),
+            # opaque -- the sea carries the horizon mixture.
+            # An infinity surface: it writes no depth and tests
+            # LEQUAL, because near the horizon its depths tie
+            # asymptotically with the bedrock's far field (both
+            # tend to exactly 1.0); painter's order -- ring after
+            # bedrock, before sea -- must decide those pixels,
+            # not a depth-precision coin flip.
             gl.glDepthMask(gl.GL_FALSE)
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glUseProgram(self._horizon_prog)
@@ -555,7 +560,43 @@ class RDWidget(QOpenGLWidget):
             gl.glBindVertexArray(0)
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDepthFunc(gl.GL_LESS)
+
+        if "sea" not in self.disabled_passes:
+            # 6. The sea, drawn last of the infinity family
+            # (slightly transparent; painter's order keeps the
+            # blending simple).  LEQUAL so that at the horizon,
+            # where everything ties at depth exactly 1.0, the
+            # sea's statistically-thinned horizon alpha blends
+            # over the terrain ring and sky beneath it.
+            self._sea.upload(
+                planes.hole_plane_strip(cam.position[0], cam.position[2], planes.SEA_Y)
+            )
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            gl.glDepthMask(gl.GL_FALSE)
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glUseProgram(self._sea_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
+            gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uHorizonAlpha"), self._sea_horizon_alpha)
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
+            gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
+            gl.glActiveTexture(gl.GL_TEXTURE1)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, self._noise_tex)
+            gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uNoise"), 1)
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            self._sea.draw()
+            gl.glDepthMask(gl.GL_TRUE)
+            gl.glDepthFunc(gl.GL_LESS)
             gl.glDisable(gl.GL_BLEND)
+
+        if "bedrock" not in self.disabled_passes and cam.position[1] < planes.BEDROCK_Y:
+            # 7. Below bedrock, the bedrock is the nearest of the
+            # infinity family overhead, so painter's algorithm
+            # wants it last: draw it again, over the sea and sky.
+            self._draw_bedrock(vp, cam_pos)
 
         self._frame += 1
         if self.on_hud is not None and self._frame % 6 == 0:

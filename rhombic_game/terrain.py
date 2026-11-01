@@ -17,12 +17,13 @@ This layer puts actual elevation in the far field:
   is the planned hierarchical subdivision basis (the 49-hexagon
   subdivision used by the bedrock pattern).
 - Beyond 10 km, a horizon ring at infinity (w = 0 vertices):
-  its far edge carries the *mean* terrain colour, with opacity
-  equal to the sampled land fraction -- at the horizon, land
-  and sea mix at sub-pixel scale in exactly that ratio.  It is
-  drawn after the sea so it blends over the sea's horizon.
-  (If the mean elevation were below sea level the roles would
-  swap; here the mean is above, by construction.)
+  one uniform colour -- the mean terrain colour lit with the
+  normal straight up -- identical at every azimuth, because a
+  horizon point represents the whole disc.  The disc is
+  ocean-dominated (land fraction 0.40, median below sea level),
+  so the sea is the transparent partner at the horizon: the
+  ring is opaque, drawn before the sea, and the sea's alpha
+  fades at the horizon to sea_fraction x its base opacity.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from .planes import SEA_Y
 HEX_A = 500.0  # hex circumradius (m); feature scale ~1/20 of range
 HOLE_RADIUS = 1500.0
 OUTER_RADIUS = 10000.0
-TARGET_MEAN_ELEVATION = 20.0  # metres; above SEA_Y, by design
+TARGET_LAND_FRACTION = 0.40  # most of the disc is ocean, like Earth
 HEIGHT_SPAN = 400.0
 HORIZON_SEGMENTS = 180
 _OCTAVES = ((3000.0, 0.60, 11), (1500.0, 0.27, 23), (750.0, 0.13, 37))
@@ -88,34 +89,56 @@ _STATS: dict | None = None
 
 
 def terrain_stats() -> dict:
-    """Sampled statistics over the disc out to OUTER_RADIUS:
-    mean elevation (pinned to TARGET_MEAN_ELEVATION by the
-    height offset), sea fraction, and mean terrain colour."""
+    """Sampled statistics over the disc out to OUTER_RADIUS.
+
+    The height offset is chosen so the sampled land fraction
+    (samples at or above SEA_Y) equals TARGET_LAND_FRACTION --
+    which puts the median elevation below sea level, like
+    Earth's ocean-dominated surface.  Also computes the mean
+    terrain colour and that colour lit as if the surface normal
+    were straight up (the horizon ring's shading: every horizon
+    point represents the whole disc, so it is identical at every
+    azimuth).
+    """
     global _STATS
     if _STATS is not None:
         return _STATS
-    heights = []
-    colours = []
+    raw = []
     rings, sectors = 40, 90
     for ri in range(1, rings + 1):
         r = OUTER_RADIUS * ri / rings
         for si in range(sectors):
             th = 2.0 * math.pi * si / sectors
-            x, z = r * math.cos(th), r * math.sin(th)
-            h = _height_raw(x, z)
-            heights.append(h)
-            colours.append(_base_colour(h))
-    mean_raw = float(np.mean(heights))
-    offset = TARGET_MEAN_ELEVATION - mean_raw
-    heights = [h + offset for h in heights]
+            raw.append(_height_raw(r * math.cos(th), r * math.sin(th)))
+    raw_sorted = sorted(raw)
+    # Offset so that the (1 - land_fraction) quantile sits at SEA_Y.
+    q = raw_sorted[min(len(raw_sorted) - 1,
+                       int((1.0 - TARGET_LAND_FRACTION) * len(raw_sorted)))]
+    offset = SEA_Y - q
+    heights = [h + offset for h in raw]
     sea_fraction = float(np.mean([1.0 if h < SEA_Y else 0.0 for h in heights]))
+    colours = [_base_colour(h) for h in heights]
     mean_colour = tuple(float(np.mean([c[k] for c in colours])) for k in range(3))
+    # Lit mean: the block shader's lighting with n = (0, 1, 0),
+    # AO = 1 -- hemisphere sky term, flat minimum ambient, sun.
+    from . import shaders as _sh
+
+    sun = np.array(_sh.SUN_DIR, dtype=float)
+    sun = sun / float(np.linalg.norm(sun))
+    ndl = float(sun[1])
+    lit = tuple(
+        mean_colour[k] * ((0.50, 0.64, 0.88)[k] + 0.16
+                          + (1.0, 0.93, 0.80)[k] * ndl * 0.95)
+        for k in range(3)
+    )
     _STATS = {
         "offset": offset,
-        "mean_elevation": TARGET_MEAN_ELEVATION,
+        "mean_elevation": float(np.mean(heights)),
+        "median_elevation": float(np.median(heights)),
         "sea_fraction": sea_fraction,
         "land_fraction": 1.0 - sea_fraction,
         "mean_colour": mean_colour,
+        "mean_lit_colour": lit,
     }
     return _STATS
 
@@ -223,24 +246,24 @@ def build_horizon_ring() -> tuple[np.ndarray, np.ndarray]:
     """Strip from the OUTER_RADIUS circle to infinity.
 
     Vertex format: (aHomog vec4, aColor vec4) -- 8 floats.
-    Inner vertices are finite (w = 1) with the terrain's own
-    colour and alpha 1; outer vertices are purely horizontal
-    directions (w = 0, y = 0) -- points at infinity lie exactly
-    on the horizon line, never above it -- carrying the mean
-    terrain colour with opacity equal to the land fraction, to
-    be blended over the sea after it is drawn.
+    Every vertex carries ONE colour: the mean terrain colour,
+    lit with the normal straight up.  A horizon point represents
+    the entire disc, so horizon points are identical except for
+    azimuth; the land/sea mixture at the horizon is carried not
+    here but in the sea's horizon alpha (the sea is the
+    transparent partner in a sea-dominant world, and it is drawn
+    after this ring).  Inner vertices are finite (w = 1); outer
+    vertices are purely horizontal directions (w = 0, y = 0),
+    exactly on the horizon line.
     """
-    stats = terrain_stats()
-    mean = stats["mean_colour"]
-    land = stats["land_fraction"]
+    lit = terrain_stats()["mean_lit_colour"]
     rows = []
     for i in range(HORIZON_SEGMENTS + 1):
         th = 2.0 * math.pi * i / HORIZON_SEGMENTS
         x, z = OUTER_RADIUS * math.cos(th), OUTER_RADIUS * math.sin(th)
         h = height(x, z)
-        c = colour_at(x, z)
-        rows.append((x, h, z, 1.0, c[0], c[1], c[2], 1.0))
-        rows.append((x, 0.0, z, 0.0, mean[0], mean[1], mean[2], land))
+        rows.append((x, h, z, 1.0, lit[0], lit[1], lit[2], 1.0))
+        rows.append((x, 0.0, z, 0.0, lit[0], lit[1], lit[2], 1.0))
     verts = np.array(rows, dtype=np.float32)
     idx = []
     for i in range(HORIZON_SEGMENTS):
