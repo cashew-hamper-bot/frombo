@@ -16,14 +16,16 @@ This layer puts actual elevation in the far field:
   on the hex lattice itself.  The same lattice at finer scale
   is the planned hierarchical subdivision basis (the 49-hexagon
   subdivision used by the bedrock pattern).
-- Beyond 10 km, a horizon ring at infinity (w = 0 vertices):
-  one uniform colour -- the mean terrain colour lit with the
-  normal straight up -- identical at every azimuth, because a
-  horizon point represents the whole disc.  The disc is
-  ocean-dominated (land fraction 0.40, median below sea level),
-  so the sea is the transparent partner at the horizon: the
-  ring is opaque, drawn before the sea, and the sea's alpha
-  fades at the horizon to sea_fraction x its base opacity.
+- Beyond the mesh, a horizon FAN: the mesh's own outer edge
+  vertices (its true boundary loop, hex zigzag and all) joined
+  by triangles to just 12 evenly spaced horizon vertices at
+  infinity (w = 0).  A horizon vertex carries one uniform
+  colour -- the mean terrain colour -- because a horizon point
+  represents the whole disc.  The disc is ocean-dominated
+  (land fraction 0.40, median below sea level), so the sea is
+  the transparent partner at the horizon: the fan is opaque,
+  drawn before the sea, and the sea's alpha fades at the
+  horizon to sea_fraction x its base opacity.
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ HOLE_RADIUS = 1500.0
 OUTER_RADIUS = 10000.0
 TARGET_LAND_FRACTION = 0.40  # most of the disc is ocean, like Earth
 HEIGHT_SPAN = 400.0
-HORIZON_SEGMENTS = 180
+HORIZON_VERTICES = 12
 _OCTAVES = ((3000.0, 0.60, 11), (1500.0, 0.27, 23), (750.0, 0.13, 37))
 
 _SQRT3 = math.sqrt(3.0)
@@ -223,42 +225,91 @@ def build_distant_terrain() -> tuple[np.ndarray, np.ndarray]:
             verts[row, 12] = 1.0
             row += 1
     idx = np.arange(len(tris) * 3, dtype=np.uint32)
+    global _EDGE_LOOP
+    _EDGE_LOOP = _outer_edge_loop(tris)
     return verts, idx
 
 
-def build_horizon_ring() -> tuple[np.ndarray, np.ndarray]:
-    """Strip from the OUTER_RADIUS circle to infinity.
+_EDGE_LOOP: list | None = None
+
+
+def _outer_edge_loop(tris) -> list:
+    """The mesh's outer boundary as an ordered loop of points.
+
+    Boundary edges belong to exactly one triangle; the outer
+    loop is the boundary component far from the origin (the
+    other component rings the 1.5 km hole).  Walked edge to
+    edge into a single ordered cycle.
+    """
+    from collections import Counter
+
+    counts: Counter = Counter()
+    for a, b, c in tris:
+        for e in ((a, b), (b, c), (c, a)):
+            counts[tuple(sorted(e))] += 1
+    adjacency: dict[tuple, list] = {}
+    for (a, b), n in counts.items():
+        if n == 1 and math.hypot(a[0], a[2]) > 6000.0:
+            adjacency.setdefault(a, []).append(b)
+            adjacency.setdefault(b, []).append(a)
+    start = next(iter(adjacency))
+    loop = [start]
+    prev, cur = None, start
+    while True:
+        nxt = adjacency[cur][0] if adjacency[cur][1] == prev else adjacency[cur][1]
+        if nxt == start:
+            break
+        loop.append(nxt)
+        prev, cur = cur, nxt
+    return loop
+
+
+def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
+    """Triangles from the mesh's outer edge loop to 12 horizon
+    vertices at infinity.
 
     Vertex format: (aHomog vec4, aColor vec4) -- 8 floats.
-    The attribute carries ALBEDO: the local terrain colour on
-    the inner edge, the disc's mean terrain colour on the outer
-    (horizon) edge.  Lighting happens in the horizon shader,
-    which integrates the diffuse response over a fan of
-    representative normals tilted from straight up to 45
-    degrees toward the viewer -- a horizon point represents
-    the entire disc, and the visible far terrain presents
-    exactly such a fan (ridges facing us; lower ground is
-    occluded behind higher ground along the same sightline).
-    The land/sea mixture at the horizon is carried not here but
-    in the sea's horizon alpha (the sea is the transparent
-    partner in a sea-dominant world, drawn after this ring).
-    Inner vertices are finite (w = 1); outer vertices are
-    purely horizontal directions (w = 0, y = 0), exactly on
-    the horizon line.
+    Edge vertices are the mesh's own boundary points (same
+    positions, same colour_at colours), so the join is
+    watertight by construction; horizon vertices are purely
+    horizontal directions (w = 0, y = 0), exactly on the
+    horizon line, carrying the disc's mean terrain colour as
+    albedo.  Lighting happens in the horizon shader, which
+    integrates the diffuse response over a fan of normals
+    tilted from straight up to 45 degrees toward the viewer.
+    Each loop segment fans to the horizon vertex of its
+    azimuth sector; at sector boundaries a bridging triangle
+    (edge point, old horizon vertex, new horizon vertex)
+    keeps the annulus between loop and horizon gapless.
     """
+    if _EDGE_LOOP is None:
+        build_distant_terrain()
+    loop = _EDGE_LOOP
     mean = terrain_stats()["mean_colour"]
     rows = []
-    for i in range(HORIZON_SEGMENTS + 1):
-        th = 2.0 * math.pi * i / HORIZON_SEGMENTS
-        x, z = OUTER_RADIUS * math.cos(th), OUTER_RADIUS * math.sin(th)
-        h = height(x, z)
+    for x, h, z in loop:
         c = colour_at(x, z)
         rows.append((x, h, z, 1.0, c[0], c[1], c[2], 1.0))
-        rows.append((x, 0.0, z, 0.0, mean[0], mean[1], mean[2], 1.0))
+    horizon_base = len(rows)
+    for k in range(HORIZON_VERTICES):
+        th = 2.0 * math.pi * k / HORIZON_VERTICES
+        rows.append((math.cos(th), 0.0, math.sin(th), 0.0,
+                     mean[0], mean[1], mean[2], 1.0))
     verts = np.array(rows, dtype=np.float32)
-    idx = []
-    for i in range(HORIZON_SEGMENTS):
-        a0, b0 = 2 * i, 2 * i + 1
-        a1, b1 = 2 * i + 2, 2 * i + 3
-        idx += [a0, a1, b1, a0, b1, b0]
+
+    def sector(x: float, z: float) -> int:
+        frac = (math.atan2(z, x) % (2.0 * math.pi)) / (2.0 * math.pi)
+        return int(frac * HORIZON_VERTICES) % HORIZON_VERTICES
+
+    idx: list[int] = []
+    n = len(loop)
+    for i in range(n):
+        j = (i + 1) % n
+        a, b = loop[i], loop[j]
+        k = sector((a[0] + b[0]) / 2.0, (a[2] + b[2]) / 2.0)
+        idx += [i, j, horizon_base + k]
+        c = loop[(j + 1) % n]
+        k_next = sector((b[0] + c[0]) / 2.0, (b[2] + c[2]) / 2.0)
+        if k_next != k:
+            idx += [j, horizon_base + k, horizon_base + k_next]
     return verts, np.array(idx, dtype=np.uint32)
