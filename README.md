@@ -184,8 +184,9 @@ out, and there is no giant finite quad to clip or z-fight.
   own vertex lattice. The disc is ocean-dominated like Earth's:
   the sampled land fraction is 0.40 and the median elevation is
   below sea level. Beyond 10 km a horizon ring at infinity
-  carries one uniform colour — the mean terrain colour lit as if
-  its normal were straight up — identical at every azimuth,
+  carries one uniform colour — the mean terrain colour, lit by
+  the diffuse response integrated over a fan of normals tilted
+  from straight up to 45° toward the viewer — identical at every azimuth,
   because each horizon point represents the whole disc; the sea
   is the transparent partner there, its alpha fading at the
   horizon to sea fraction × base opacity, and it is drawn last
