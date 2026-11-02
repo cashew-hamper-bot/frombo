@@ -189,7 +189,7 @@ class RDWidget(QOpenGLWidget):
         # the sea's base opacity (0.86); see the sea shader.
         self._sea_horizon_alpha = terrain.terrain_stats()["sea_fraction"] * 0.86
         self._horizon_prog = _program(shaders.HORIZON_VERT, shaders.HORIZON_FRAG)
-        hverts, hidx = terrain.build_horizon_ring()
+        hverts, hidx = terrain.build_horizon_fan()
         self._horizon_count = len(hidx)
         self._horizon_vao = gl.glGenVertexArrays(1)
         hvbo = gl.glGenBuffers(1)
@@ -573,34 +573,6 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthFunc(gl.GL_LESS)
 
 
-        if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
-            # 2. The horizon ring, drawn second, right after the
-            # sky, because that is what it is: a directional
-            # backdrop.  Its vertex shader projects every vertex
-            # to a direction from the camera, so all its
-            # fragments sit at depth exactly 1.0 -- the same
-            # screen image as the finite ribbon, but honestly at
-            # infinity, where each horizon point represents the
-            # whole disc.  It WRITES that depth and tests LEQUAL:
-            # it wins its tie against the sky by painter order,
-            # and every finite surface drawn later (bedrock,
-            # terrain, sea, blocks) overdraws it by depth
-            # wherever that surface is genuinely in front --
-            # including the sea, whose horizon blend therefore
-            # still paints the land/sea mixture over it.
-            gl.glUseProgram(self._horizon_prog)
-            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uSunDir"), 1, sun)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uCamPos"), 1, cam_pos)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uHazeColor"), 1, self._haze_col)
-            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 0.0)
-            gl.glBindVertexArray(self._horizon_vao)
-            gl.glDrawElements(gl.GL_TRIANGLES, self._horizon_count, gl.GL_UNSIGNED_INT, None)
-            gl.glBindVertexArray(0)
-            gl.glDepthMask(gl.GL_TRUE)
-            gl.glDepthFunc(gl.GL_LESS)
-
-
         # One depth buffer, two ranges: the near pass owns
         # [0, 0.5), the far pass [0.5, 1].  Near geometry is
         # drawn first; every far depth is larger than every near
@@ -642,8 +614,29 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawElements(gl.GL_TRIANGLES, tcount, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
 
+        if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
+            # 7. The horizon fan: triangles from the mesh's own
+            # outer edge loop (its true boundary vertices) to 12
+            # horizon vertices at infinity.  Finite, depth-
+            # writing geometry in the ordinary way -- its inner
+            # edge is watertight with the mesh because it IS the
+            # mesh edge -- drawn after the mesh, before the sea,
+            # whose horizon blend paints over its outer sliver
+            # on the LEQUAL tie at depth 1.0.
+            gl.glDepthFunc(gl.GL_LEQUAL)
+            gl.glUseProgram(self._horizon_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uSunDir"), 1, sun)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uHazeColor"), 1, self._haze_col)
+            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 0.0)
+            gl.glBindVertexArray(self._horizon_vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, self._horizon_count, gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthFunc(gl.GL_LESS)
+
         if "sea" not in self.disabled_passes and self._show_sea and self._show_far:
-            # 7. The sea, drawn last because it is transparent
+            # 8. The sea, drawn last because it is transparent
             # (blending needs the surfaces behind it down first),
             # not because visibility needs the order: it writes
             # depth and tests LEQUAL, so the depth buffer decides
@@ -680,7 +673,7 @@ class RDWidget(QOpenGLWidget):
         # already keeps the sea behind the ceiling from below.)
 
         if self._show_boundary:
-            # 8. Debug overlay: the split itself.  The boundary
+            # 9. Debug overlay: the split itself.  The boundary
             # is not a cylinder around the camera -- it is the
             # view plane at eye depth = split, perpendicular to
             # the view direction (fragments are clipped by eye

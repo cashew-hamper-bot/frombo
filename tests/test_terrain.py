@@ -38,33 +38,54 @@ class TerrainTests(unittest.TestCase):
         # AO is 1 everywhere: no occlusion in the far field.
         self.assertTrue(np.all(verts[:, 12] == 1.0))
 
-    def test_horizon_ring(self):
-        verts, idx = terrain.build_horizon_ring()
+    def test_horizon_fan(self):
+        verts, idx = terrain.build_horizon_fan()
         self.assertEqual(verts.shape[1], 8)  # aHomog vec4 + aColor vec4
-        inner = verts[0::2]
-        outer = verts[1::2]
-        self.assertTrue(np.all(inner[:, 3] == 1.0))  # finite
-        self.assertTrue(np.all(outer[:, 3] == 0.0))  # at infinity
-        # Infinity points lie exactly on the horizon: their
-        # direction is purely horizontal.
-        self.assertTrue(np.all(outer[:, 1] == 0.0))
-        # The ring is opaque (the sea carries the horizon
-        # mixture).  Albedo: the outer (horizon) row is uniform
-        # and equal to the mean terrain colour; the inner row
-        # carries the local terrain colour at its azimuth.
+        n_h = terrain.HORIZON_VERTICES
+        edge, horizon = verts[:-n_h], verts[-n_h:]
+        self.assertEqual(len(horizon), 12)
+        self.assertTrue(np.all(edge[:, 3] == 1.0))  # finite
+        self.assertTrue(np.all(horizon[:, 3] == 0.0))  # at infinity
+        # Horizon points lie exactly on the horizon: purely
+        # horizontal directions, evenly spaced in azimuth.
+        self.assertTrue(np.all(horizon[:, 1] == 0.0))
+        ang = np.sort(np.arctan2(horizon[:, 2], horizon[:, 0]))
+        np.testing.assert_allclose(
+            np.diff(np.concatenate([ang, ang[:1] + 2 * np.pi])),
+            2 * np.pi / 12, atol=1e-6)
+        # Albedo: horizon vertices uniform mean terrain colour;
+        # edge vertices carry their local terrain colour.
         self.assertTrue(np.all(verts[:, 7] == 1.0))
         mean = terrain.terrain_stats()["mean_colour"]
-        self.assertEqual(
-            float(np.abs(outer[:, 4:7] - outer[0, 4:7]).max()), 0.0)
         np.testing.assert_allclose(
-            outer[0, 4:7], np.array(mean, dtype=np.float32), atol=1e-6)
+            horizon[:, 4:7],
+            np.tile(np.array(mean, dtype=np.float32), (12, 1)), atol=1e-6)
         np.testing.assert_allclose(
-            inner[0, 4:7],
-            np.array(terrain.colour_at(inner[0, 0], inner[0, 2]),
+            edge[0, 4:7],
+            np.array(terrain.colour_at(edge[0, 0], edge[0, 2]),
                      dtype=np.float32),
             atol=1e-6)
-        r = np.hypot(inner[:, 0], inner[:, 2])
-        np.testing.assert_allclose(r, terrain.OUTER_RADIUS, atol=1.0)
+        # Watertight by construction: every edge vertex position
+        # is a vertex of the distant-terrain mesh itself.
+        mverts, _ = terrain.build_distant_terrain()
+        mesh_pos = {
+            (round(float(x), 2), round(float(y), 2), round(float(z), 2))
+            for x, y, z in mverts[:, 0:3]
+        }
+        for x, y, z in edge[:, 0:3]:
+            self.assertIn(
+                (round(float(x), 2), round(float(y), 2), round(float(z), 2)),
+                mesh_pos)
+        # The edge loop rings the mesh near the outer radius,
+        # zigzagging with the hex boundary rather than sitting
+        # on the ideal circle.
+        r = np.hypot(edge[:, 0], edge[:, 2])
+        self.assertGreater(float(r.min()), terrain.OUTER_RADIUS - 1200.0)
+        self.assertLess(float(r.max()), terrain.OUTER_RADIUS + terrain.HEX_A + 1.0)
+        # Every horizon vertex is used by at least one triangle.
+        used = set(int(i) for i in idx)
+        for k in range(12):
+            self.assertIn(len(edge) + k, used)
 
 
 if __name__ == "__main__":

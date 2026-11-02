@@ -183,10 +183,12 @@ out, and there is no giant finite quad to clip or z-fight.
   whose nodes sit on the triangular lattice — the hex tiling's
   own vertex lattice. The disc is ocean-dominated like Earth's:
   the sampled land fraction is 0.40 and the median elevation is
-  below sea level. Beyond 10 km a horizon ring at infinity
-  carries one uniform colour — the mean terrain colour, lit by
-  the diffuse response integrated over a fan of normals tilted
-  from straight up to 45° toward the viewer — identical at every azimuth,
+  below sea level. Beyond the mesh, a horizon fan joins the
+  mesh's own outer edge loop (162 boundary vertices, hex zigzag
+  and all) by triangles to 12 evenly spaced horizon vertices at
+  infinity, each carrying one uniform colour — the mean terrain
+  colour, lit by the diffuse response integrated over a fan of
+  normals tilted from straight up to 45° toward the viewer —
   because each horizon point represents the whole disc; the sea
   is the transparent partner there, its alpha fading at the
   horizon to sea fraction × base opacity, and it is drawn last
