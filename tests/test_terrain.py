@@ -43,7 +43,7 @@ class TerrainTests(unittest.TestCase):
         self.assertEqual(verts.shape[1], 8)  # aHomog vec4 + aColor vec4
         n_h = terrain.HORIZON_VERTICES
         edge, horizon = verts[:-n_h], verts[-n_h:]
-        self.assertEqual(len(horizon), 12)
+        self.assertEqual(len(horizon), terrain.HORIZON_VERTICES)
         self.assertTrue(np.all(edge[:, 3] == 1.0))  # finite
         self.assertTrue(np.all(horizon[:, 3] == 0.0))  # at infinity
         # Horizon points lie exactly on the horizon: purely
@@ -52,14 +52,14 @@ class TerrainTests(unittest.TestCase):
         ang = np.sort(np.arctan2(horizon[:, 2], horizon[:, 0]))
         np.testing.assert_allclose(
             np.diff(np.concatenate([ang, ang[:1] + 2 * np.pi])),
-            2 * np.pi / 12, atol=1e-6)
-        # Albedo: horizon vertices uniform mean terrain colour;
+            2 * np.pi / terrain.HORIZON_VERTICES, atol=1e-6)
+        # Albedo: horizon vertices uniform constant colour;
         # edge vertices carry their local terrain colour.
         self.assertTrue(np.all(verts[:, 7] == 1.0))
-        mean = terrain.terrain_stats()["mean_colour"]
         np.testing.assert_allclose(
             horizon[:, 4:7],
-            np.tile(np.array(mean, dtype=np.float32), (12, 1)), atol=1e-6)
+            np.tile(np.array(terrain.HORIZON_COLOUR, dtype=np.float32),
+                    (terrain.HORIZON_VERTICES, 1)), atol=1e-6)
         np.testing.assert_allclose(
             edge[0, 4:7],
             np.array(terrain.colour_at(edge[0, 0], edge[0, 2]),
@@ -84,7 +84,7 @@ class TerrainTests(unittest.TestCase):
         self.assertLess(float(r.max()), terrain.OUTER_RADIUS + terrain.HEX_A + 1.0)
         # Every horizon vertex is used by at least one triangle.
         used = set(int(i) for i in idx)
-        for k in range(12):
+        for k in range(terrain.HORIZON_VERTICES):
             self.assertIn(len(edge) + k, used)
 
 

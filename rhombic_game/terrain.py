@@ -18,10 +18,10 @@ This layer puts actual elevation in the far field:
   subdivision used by the bedrock pattern).
 - Beyond the mesh, a horizon FAN: the mesh's own outer edge
   vertices (its true boundary loop, hex zigzag and all) joined
-  by triangles to just 12 evenly spaced horizon vertices at
+  by triangles to 180 evenly spaced horizon vertices at
   infinity (w = 0).  A horizon vertex carries one uniform
-  colour -- the mean terrain colour -- because a horizon point
-  represents the whole disc.  The disc is ocean-dominated
+  colour -- a constant medium dark green/brown for now --
+  because a horizon point represents the whole disc.  The disc is ocean-dominated
   (land fraction 0.40, median below sea level), so the sea is
   the transparent partner at the horizon: the fan is opaque,
   drawn before the sea, and the sea's alpha fades at the
@@ -41,7 +41,8 @@ HOLE_RADIUS = 1500.0
 OUTER_RADIUS = 10000.0
 TARGET_LAND_FRACTION = 0.40  # most of the disc is ocean, like Earth
 HEIGHT_SPAN = 400.0
-HORIZON_VERTICES = 12
+HORIZON_VERTICES = 180
+HORIZON_COLOUR = (0.38, 0.42, 0.28)  # constant medium dark green/brown (for now)
 _OCTAVES = ((3000.0, 0.60, 11), (1500.0, 0.27, 23), (750.0, 0.13, 37))
 
 _SQRT3 = math.sqrt(3.0)
@@ -265,7 +266,7 @@ def _outer_edge_loop(tris) -> list:
 
 
 def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
-    """Triangles from the mesh's outer edge loop to 12 horizon
+    """Triangles from the mesh's outer edge loop to 180 horizon
     vertices at infinity.
 
     Vertex format: (aHomog vec4, aColor vec4) -- 8 floats.
@@ -273,8 +274,9 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
     positions, same colour_at colours), so the join is
     watertight by construction; horizon vertices are purely
     horizontal directions (w = 0, y = 0), exactly on the
-    horizon line, carrying the disc's mean terrain colour as
-    albedo.  Lighting happens in the horizon shader, which
+    horizon line, carrying a constant medium dark green/brown
+    (HORIZON_COLOUR) as albedo -- deliberately not fancy until
+    the bigger geometry is flawless.  Lighting happens in the horizon shader, which
     integrates the diffuse response over a fan of normals
     tilted from straight up to 45 degrees toward the viewer.
     Each loop segment fans to the horizon vertex of its
@@ -285,7 +287,6 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
     if _EDGE_LOOP is None:
         build_distant_terrain()
     loop = _EDGE_LOOP
-    mean = terrain_stats()["mean_colour"]
     rows = []
     for x, h, z in loop:
         c = colour_at(x, z)
@@ -294,7 +295,8 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
     for k in range(HORIZON_VERTICES):
         th = 2.0 * math.pi * k / HORIZON_VERTICES
         rows.append((math.cos(th), 0.0, math.sin(th), 0.0,
-                     mean[0], mean[1], mean[2], 1.0))
+                     HORIZON_COLOUR[0], HORIZON_COLOUR[1],
+                     HORIZON_COLOUR[2], 1.0))
     verts = np.array(rows, dtype=np.float32)
 
     def sector(x: float, z: float) -> int:
@@ -310,6 +312,12 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
         idx += [i, j, horizon_base + k]
         c = loop[(j + 1) % n]
         k_next = sector((b[0] + c[0]) / 2.0, (b[2] + c[2]) / 2.0)
-        if k_next != k:
-            idx += [j, horizon_base + k, horizon_base + k_next]
+        # Bridge every sector boundary the segment spans (a
+        # ~500 m edge segment covers ~3 degrees, more than one
+        # 2-degree sector at 180 horizon vertices).
+        m = k
+        while m != k_next:
+            m2 = (m + 1) % HORIZON_VERTICES
+            idx += [j, horizon_base + m, horizon_base + m2]
+            m = m2
     return verts, np.array(idx, dtype=np.uint32)
