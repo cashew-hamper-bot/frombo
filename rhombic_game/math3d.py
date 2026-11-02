@@ -60,6 +60,21 @@ def ray_direction(vp_inverse: np.ndarray, ndc_x: float, ndc_y: float) -> np.ndar
     return d / np.linalg.norm(d)
 
 
+def perspective_finite(fov_y_rad: float, aspect: float, near: float, far: float) -> np.ndarray:
+    """Ordinary finite perspective projection (near pass)."""
+    f = 1.0 / math.tan(fov_y_rad / 2.0)
+    a = (far + near) / (near - far)
+    b = 2.0 * far * near / (near - far)
+    return np.array(
+        [
+            [f / aspect, 0.0, 0.0, 0.0],
+            [0.0, f, 0.0, 0.0],
+            [0.0, 0.0, a, b],
+            [0.0, 0.0, -1.0, 0.0],
+        ]
+    )
+
+
 def look_delta(
     pitch: float,
     x: float,
@@ -167,5 +182,11 @@ class Camera:
         m[2, 3] = -float(back @ p)
         return m
 
-    def view_projection(self, fov_y_rad: float, aspect: float, near: float) -> np.ndarray:
-        return perspective_infinite(fov_y_rad, aspect, near) @ self.view_matrix()
+    def view_projection(
+        self, fov_y_rad: float, aspect: float, near: float, far: float = None
+    ) -> np.ndarray:
+        if far is None:
+            proj = perspective_infinite(fov_y_rad, aspect, near)
+        else:
+            proj = perspective_finite(fov_y_rad, aspect, near, far)
+        return proj @ self.view_matrix()
