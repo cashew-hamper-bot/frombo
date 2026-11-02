@@ -287,7 +287,18 @@ void main() {
         lit = mix(lit, uHazeColor, hazeF);
     }
     vColor = vec4(lit, aColor.a);
-    gl_Position = uVP * aHomog;
+    // Directional backdrop: a finite vertex is projected along
+    // its own ray from the camera (w = 0), which lands on the
+    // identical screen position but at depth exactly 1.0.  The
+    // ring is a horizon statistic, not a surface at 10 km; this
+    // makes its depth honest about that.  (Lighting and haze
+    // above still use the finite position: the colour belongs
+    // to the terrain the ray summarises.)
+    vec4 pos = aHomog;
+    if (pos.w > 0.5 && uDebug < 0.5) {
+        pos = vec4(pos.xyz - uCamPos, 0.0);
+    }
+    gl_Position = uVP * pos;
 }
 """
 
