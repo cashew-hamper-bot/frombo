@@ -300,57 +300,24 @@ HORIZON_VERT = """
 layout(location = 0) in vec4 aHomog;
 layout(location = 1) in vec4 aColor;
 uniform mat4 uVP;
-uniform vec3 uSunDir;
-uniform vec3 uCamPos;
-uniform vec3 uHazeColor;
-uniform float uDebug;
-// Perspective-correct interpolation, deliberately (the
-// screen-linear noperspective experiment read weird and is
-// reverted): it weights a horizon vertex's colour by 1/clip-w
-// roughly a thousand to one over an edge vertex's, which was
-// fatal when the fan blended between DIFFERENT colours.  With
-// a single uniform terrain colour everywhere (see terrain.py)
-// there is nothing for the weighting to corrupt -- every
-// vertex carries the same albedo, and the fan is shaded by
-// one statistic -- so the standard interpolation is correct
-// again, and cheaper to reason about.
 out vec4 vColor;
+out vec4 vWorldH;
 void main() {
-    vec3 lit = aColor.rgb;
-    float hazeF = 0.80;
-    if (uDebug > 0.5) {
-        hazeF = 0.0;
-    } else if (aHomog.w > 0.5) {
-        float dist = length(aHomog.xyz - uCamPos);
-        hazeF = 0.80 * (1.0 - exp(-dist / 12000.0));
-    }
-    if (uDebug < 0.5) {
-        // ONE lighting statistic for the whole fan, edge and
-        // horizon vertices alike: integrate the diffuse
-        // response over normals tilted from straight up to 45
-        // degrees toward the viewer.  The far terrain actually
-        // presents such a fan of normals -- every ridge facing
-        // us at every tilt, with lower ground occluded behind
-        // it.  With a single uniform albedo and this single
-        // statistic, the fan has nothing left to blend badly.
-        vec3 sunDir = normalize(uSunDir);
-        vec2 toViewer = aHomog.w > 0.5
-            ? normalize(uCamPos.xz - aHomog.xz)
-            : normalize(-aHomog.xz);
-        vec3 acc = vec3(0.0);
-        for (int i = 0; i < 4; i++) {
-            float tilt = radians(15.0 * float(i));
-            vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
-                                    toViewer.y * sin(tilt)));
-            vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
-                            0.5 + 0.5 * n.y);
-            acc += hemi + vec3(0.16)
-                 + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
-        }
-        lit = aColor.rgb * (acc / 4.0);
-        lit = mix(lit, uHazeColor, hazeF);
-    }
-    vColor = vec4(lit, aColor.a);
+    // Pass-through only: the albedo and the homogeneous world
+    // position.  Everything that is a nonlinear function of
+    // position -- the tilted-fan lighting statistic and the
+    // distance haze -- is evaluated per fragment, in the
+    // fragment shader, from the exactly reconstructed world
+    // position: the bedrock/sea plane shaders' architecture.
+    // Baking them into a vertex colour and interpolating the
+    // finished colour across the fan's finite/infinite vertex
+    // mix corrupted it (projective interpolation weights by
+    // 1/clip-w; a horizon vertex's clip w is ~1000x smaller
+    // than an edge vertex's, so the horizon colour swallowed
+    // the band).  Position is affine, so its interpolation is
+    // exact; the fragment divides and evaluates honestly.
+    vColor = aColor;
+    vWorldH = aHomog;
     gl_Position = uVP * aHomog;
 }
 """
@@ -358,8 +325,49 @@ void main() {
 HORIZON_FRAG = """
 #version 330 core
 in vec4 vColor;
+in vec4 vWorldH;
+uniform vec3 uSunDir;
+uniform vec3 uCamPos;
+uniform vec3 uHazeColor;
+uniform float uDebug;
 out vec4 fragColor;
 void main() {
-    fragColor = vColor;
+    if (uDebug > 0.5) {
+        // The split-plane intersection ribbons: raw colour,
+        // no lighting, no haze.
+        fragColor = vColor;
+        return;
+    }
+    if (vWorldH.w <= 0.0) discard;
+    vec3 wp = vWorldH.xyz / vWorldH.w;
+    // Representative-normal lighting, evaluated at THIS
+    // fragment: integrate the diffuse response over normals
+    // tilted from straight up to 45 degrees toward the
+    // viewer.  The far terrain actually presents such a fan
+    // of normals -- every ridge facing us at every tilt, with
+    // lower ground occluded behind it.  The toward-viewer
+    // direction comes from the homogeneous difference
+    // (xyz - cam * w), which stays finite at the horizon
+    // vertices where wp itself runs off to infinity.
+    vec2 toViewer = normalize(-(vWorldH.xz - uCamPos.xz * vWorldH.w));
+    vec3 sunDir = normalize(uSunDir);
+    vec3 acc = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+        float tilt = radians(15.0 * float(i));
+        vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
+                                toViewer.y * sin(tilt)));
+        vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
+                        0.5 + 0.5 * n.y);
+        acc += hemi + vec3(0.16)
+             + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
+    }
+    vec3 col = vColor.rgb * (acc / 4.0);
+    // Distance haze, capped at 80% (see the block shader),
+    // from the fragment's true distance: near the mesh edge
+    // it is the edge's own light haze, approaching the cap
+    // asymptotically only at the horizon itself.
+    float dist = length(wp - uCamPos);
+    col = mix(col, uHazeColor, 0.80 * (1.0 - exp(-dist / 12000.0)));
+    fragColor = vec4(col, vColor.a);
 }
 """

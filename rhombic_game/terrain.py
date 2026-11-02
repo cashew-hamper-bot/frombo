@@ -281,8 +281,11 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
     horizontal directions (w = 0, y = 0), exactly on the
     horizon line, carrying a constant medium dark green/brown
     (HORIZON_COLOUR) as albedo -- deliberately not fancy until
-    the bigger geometry is flawless.  Lighting happens in the horizon shader, which
-    integrates the diffuse response over a fan of normals
+    the bigger geometry is flawless.  Lighting and haze are
+    evaluated per fragment in the horizon fragment shader,
+    from the world position reconstructed out of the
+    homogeneous varying -- the plane shaders' pattern --
+    integrating the diffuse response over a fan of normals
     tilted from straight up to 45 degrees toward the viewer.
     Each loop segment fans to the horizon vertex of its
     azimuth sector; at sector boundaries a bridging triangle
