@@ -299,25 +299,22 @@ HORIZON_VERT = """
 #version 330 core
 layout(location = 0) in vec4 aHomog;
 layout(location = 1) in vec4 aColor;
-layout(location = 2) in vec3 aNormal;
 uniform mat4 uVP;
 uniform vec3 uSunDir;
 uniform vec3 uCamPos;
 uniform vec3 uHazeColor;
 uniform float uDebug;
-// noperspective is load-bearing, not a flourish.  A horizon
-// vertex's clip w is ~cos(angle to the view forward) -- order
-// 1 -- while an edge vertex's is its view depth in metres --
-// order 10^3-10^4.  Perspective-correct interpolation weights
-// by 1/w, so the horizon vertex's colour outweighed the edge
-// colour roughly a thousand to one: every fan fragment came
-// out in the horizon colour, flat, all the way to the mesh
-// edge (measured: a 70-pixel band at a constant RGB, stepping
-// hard to the mesh's dark brown at the seam).  The fan is a
-// colour ramp, not a surface; screen-linear interpolation is
-// the ramp the design intends: the edge colour at the seam,
-// grading evenly across the band to the horizon colour.
-noperspective out vec4 vColor;
+// Perspective-correct interpolation, deliberately (the
+// screen-linear noperspective experiment read weird and is
+// reverted): it weights a horizon vertex's colour by 1/clip-w
+// roughly a thousand to one over an edge vertex's, which was
+// fatal when the fan blended between DIFFERENT colours.  With
+// a single uniform terrain colour everywhere (see terrain.py)
+// there is nothing for the weighting to corrupt -- every
+// vertex carries the same albedo, and the fan is shaded by
+// one statistic -- so the standard interpolation is correct
+// again, and cheaper to reason about.
+out vec4 vColor;
 void main() {
     vec3 lit = aColor.rgb;
     float hazeF = 0.80;
@@ -328,45 +325,29 @@ void main() {
         hazeF = 0.80 * (1.0 - exp(-dist / 12000.0));
     }
     if (uDebug < 0.5) {
+        // ONE lighting statistic for the whole fan, edge and
+        // horizon vertices alike: integrate the diffuse
+        // response over normals tilted from straight up to 45
+        // degrees toward the viewer.  The far terrain actually
+        // presents such a fan of normals -- every ridge facing
+        // us at every tilt, with lower ground occluded behind
+        // it.  With a single uniform albedo and this single
+        // statistic, the fan has nothing left to blend badly.
         vec3 sunDir = normalize(uSunDir);
-        vec3 light;
-        if (aHomog.w > 0.5) {
-            // A finite edge vertex is a mesh vertex: light it
-            // with the block shader's model evaluated with the
-            // vertex's own smooth normal and the RAW sun
-            // direction (the block shader does not normalize
-            // it), AO = 1 -- the same value the mesh computes
-            // at this point, so the fan continues the mesh's
-            // shading, not an approximation of it.
-            vec3 n = aNormal;
-            vec3 hemi = mix(vec3(0.34, 0.29, 0.24), vec3(0.50, 0.64, 0.88),
+        vec2 toViewer = aHomog.w > 0.5
+            ? normalize(uCamPos.xz - aHomog.xz)
+            : normalize(-aHomog.xz);
+        vec3 acc = vec3(0.0);
+        for (int i = 0; i < 4; i++) {
+            float tilt = radians(15.0 * float(i));
+            vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
+                                    toViewer.y * sin(tilt)));
+            vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
                             0.5 + 0.5 * n.y);
-            light = hemi * (0.45 + 0.55 * 1.0) + vec3(0.16)
-                  + vec3(1.0, 0.93, 0.80) * max(dot(n, uSunDir), 0.0) * 0.95;
-        } else {
-            // Representative-normal lighting for a horizon
-            // point: integrate the diffuse response over
-            // normals tilted from straight up to 45 degrees
-            // toward the viewer.  The far terrain actually
-            // presents such a fan of normals -- every ridge
-            // facing us at every tilt, with lower ground
-            // occluded behind it -- so the horizon colour is
-            // that fan's average response, not the flat-up
-            // response (which reads too bright).
-            vec2 toViewer = normalize(-aHomog.xz);
-            vec3 acc = vec3(0.0);
-            for (int i = 0; i < 4; i++) {
-                float tilt = radians(15.0 * float(i));
-                vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
-                                        toViewer.y * sin(tilt)));
-                vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
-                                0.5 + 0.5 * n.y);
-                acc += hemi + vec3(0.16)
-                     + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
-            }
-            light = acc / 4.0;
+            acc += hemi + vec3(0.16)
+                 + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
         }
-        lit = aColor.rgb * light;
+        lit = aColor.rgb * (acc / 4.0);
         lit = mix(lit, uHazeColor, hazeF);
     }
     vColor = vec4(lit, aColor.a);
@@ -376,7 +357,7 @@ void main() {
 
 HORIZON_FRAG = """
 #version 330 core
-noperspective in vec4 vColor;
+in vec4 vColor;
 out vec4 fragColor;
 void main() {
     fragColor = vColor;
