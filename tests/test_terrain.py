@@ -38,9 +38,17 @@ class TerrainTests(unittest.TestCase):
         # AO is 1 everywhere: no occlusion in the far field.
         self.assertTrue(np.all(verts[:, 12] == 1.0))
 
+    def test_uniform_terrain_colour(self):
+        # One uniform albedo for all distant terrain (mesh,
+        # fan, horizon) until the bigger geometry is flawless:
+        # colour_at is the same constant at any position.
+        for x, z in ((0.0, 0.0), (5000.0, -3000.0), (-8200.0, 4100.0)):
+            self.assertEqual(terrain.colour_at(x, z), terrain.TERRAIN_COLOUR)
+        self.assertEqual(terrain.HORIZON_COLOUR, terrain.TERRAIN_COLOUR)
+
     def test_horizon_fan(self):
         verts, idx = terrain.build_horizon_fan()
-        self.assertEqual(verts.shape[1], 11)  # aHomog + aColor + aNormal
+        self.assertEqual(verts.shape[1], 8)  # aHomog vec4 + aColor vec4
         n_h = terrain.HORIZON_VERTICES
         edge, horizon = verts[:-n_h], verts[-n_h:]
         self.assertEqual(len(horizon), terrain.HORIZON_VERTICES)
@@ -82,15 +90,6 @@ class TerrainTests(unittest.TestCase):
         r = np.hypot(edge[:, 0], edge[:, 2])
         self.assertGreater(float(r.min()), terrain.OUTER_RADIUS - 1200.0)
         self.assertLess(float(r.max()), terrain.OUTER_RADIUS + terrain.HEX_A + 1.0)
-        # Edge vertices carry unit smooth normals (the mesh's
-        # own, so the fan shades with the mesh's model at the
-        # seam); horizon vertices carry a nominal up normal.
-        en = np.linalg.norm(edge[:, 8:11], axis=1)
-        np.testing.assert_allclose(en, 1.0, atol=1e-5)
-        np.testing.assert_allclose(
-            horizon[:, 8:11],
-            np.tile(np.array((0.0, 1.0, 0.0), dtype=np.float32),
-                    (terrain.HORIZON_VERTICES, 1)), atol=0.0)
         # Every horizon vertex is used by at least one triangle.
         used = set(int(i) for i in idx)
         for k in range(terrain.HORIZON_VERTICES):

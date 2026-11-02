@@ -42,7 +42,8 @@ OUTER_RADIUS = 10000.0
 TARGET_LAND_FRACTION = 0.40  # most of the disc is ocean, like Earth
 HEIGHT_SPAN = 400.0
 HORIZON_VERTICES = 180
-HORIZON_COLOUR = (0.38, 0.42, 0.28)  # constant medium dark green/brown (for now)
+TERRAIN_COLOUR = (0.38, 0.42, 0.28)  # THE terrain colour for now: one uniform albedo everywhere
+HORIZON_COLOUR = TERRAIN_COLOUR  # the horizon points carry the same colour
 _OCTAVES = ((3000.0, 0.60, 11), (1500.0, 0.27, 23), (750.0, 0.13, 37))
 
 _SQRT3 = math.sqrt(3.0)
@@ -154,10 +155,14 @@ def _base_colour(h: float) -> tuple[float, float, float]:
 
 
 def colour_at(x: float, z: float) -> tuple[float, float, float]:
-    h = height(x, z)
-    base = _base_colour(h)
-    tint = 0.96 + 0.08 * _hash01(int(x // HEX_A), int(z // HEX_A), 91)
-    return tuple(min(1.0, c * tint) for c in base)
+    # A single uniform colour for ALL distant terrain for the
+    # time being (Christopher, 2026-11-02): with one albedo
+    # everywhere -- mesh, fan edge, horizon -- colour blending
+    # across the fan cannot be an issue at all, whatever the
+    # interpolation does.  The elevation stops in _base_colour
+    # are parked, not deleted: they return when the bigger
+    # geometry is flawless.
+    return TERRAIN_COLOUR
 
 
 def _hex_centres():
@@ -226,14 +231,12 @@ def build_distant_terrain() -> tuple[np.ndarray, np.ndarray]:
             verts[row, 12] = 1.0
             row += 1
     idx = np.arange(len(tris) * 3, dtype=np.uint32)
-    global _EDGE_LOOP, _EDGE_NORMALS
+    global _EDGE_LOOP
     _EDGE_LOOP = _outer_edge_loop(tris)
-    _EDGE_NORMALS = [tuple(float(c) for c in smooth[p]) for p in _EDGE_LOOP]
     return verts, idx
 
 
 _EDGE_LOOP: list | None = None
-_EDGE_NORMALS: list | None = None
 
 
 def _outer_edge_loop(tris) -> list:
@@ -271,11 +274,10 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
     """Triangles from the mesh's outer edge loop to 180 horizon
     vertices at infinity.
 
-    Vertex format: (aHomog vec4, aColor vec4, aNormal vec3)
-    -- 11 floats.  Edge vertices are the mesh's own boundary
-    points (same positions, same colour_at colours, same
-    smooth normals), so the join is watertight by construction
-    and shaded by the same model; horizon vertices are purely
+    Vertex format: (aHomog vec4, aColor vec4) -- 8 floats.
+    Edge vertices are the mesh's own boundary points (same
+    positions, same colour_at colours), so the join is
+    watertight by construction; horizon vertices are purely
     horizontal directions (w = 0, y = 0), exactly on the
     horizon line, carrying a constant medium dark green/brown
     (HORIZON_COLOUR) as albedo -- deliberately not fancy until
@@ -291,15 +293,15 @@ def build_horizon_fan() -> tuple[np.ndarray, np.ndarray]:
         build_distant_terrain()
     loop = _EDGE_LOOP
     rows = []
-    for (x, h, z), (nx, ny, nz) in zip(loop, _EDGE_NORMALS):
+    for x, h, z in loop:
         c = colour_at(x, z)
-        rows.append((x, h, z, 1.0, c[0], c[1], c[2], 1.0, nx, ny, nz))
+        rows.append((x, h, z, 1.0, c[0], c[1], c[2], 1.0))
     horizon_base = len(rows)
     for k in range(HORIZON_VERTICES):
         th = 2.0 * math.pi * k / HORIZON_VERTICES
         rows.append((math.cos(th), 0.0, math.sin(th), 0.0,
                      HORIZON_COLOUR[0], HORIZON_COLOUR[1],
-                     HORIZON_COLOUR[2], 1.0, 0.0, 1.0, 0.0))
+                     HORIZON_COLOUR[2], 1.0))
     verts = np.array(rows, dtype=np.float32)
 
     def sector(x: float, z: float) -> int:

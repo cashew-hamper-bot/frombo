@@ -192,21 +192,17 @@ out, and there is no giant finite quad to clip or z-fight.
   below sea level. Beyond the mesh, a horizon fan joins the
   mesh's own outer edge loop (162 boundary vertices, hex zigzag
   and all) by triangles to 180 evenly spaced horizon vertices at
-  infinity, each carrying one uniform colour — a constant
-  medium dark green/brown for now, lit by the diffuse response
-  integrated over a fan of normals tilted from straight up to
-  45° toward the viewer — because each horizon point
-  represents the whole disc. The fan's colour varying is
-  interpolated `noperspective` (screen-linear): a horizon
-  vertex's clip w is order 1 while an edge vertex's is its
-  view depth in metres, so perspective-correct interpolation
-  weighted the horizon colour roughly a thousand to one and
-  the whole band rendered in the horizon colour, flat, with
-  a hard step at the mesh edge. Screen-linear, the fan is
-  the colour ramp it is meant to be: the edge vertices carry
-  the mesh's own smooth normals and are lit by the block
-  shader's model, so the ramp starts at exactly the mesh's
-  edge colour and grades evenly to the horizon colour; the sea
+  infinity, each carrying one uniform colour — and for now
+  the mesh and the fan share a single uniform albedo
+  everywhere, a constant medium dark green/brown
+  (TERRAIN_COLOUR): with one colour there is no colour
+  blending left to get wrong, whatever the interpolation
+  does, so the fan is back to standard perspective-correct
+  interpolation and one lighting statistic (the diffuse
+  response integrated over a fan of normals tilted from
+  straight up to 45° toward the viewer). The elevation colour
+  stops are parked in terrain.py until the bigger geometry
+  is flawless; the sea
   is the transparent partner there, its alpha fading at the
   horizon to sea fraction × base opacity, and it is drawn last
   (it is transparent; blending wants the background down first).

@@ -214,11 +214,9 @@ class RDWidget(QOpenGLWidget):
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, hebo)
         gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, hidx.nbytes, hidx, gl.GL_STATIC_DRAW)
         gl.glEnableVertexAttribArray(0)
-        gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 44, None)
+        gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, None)
         gl.glEnableVertexAttribArray(1)
-        gl.glVertexAttribPointer(1, 4, gl.GL_FLOAT, gl.GL_FALSE, 44, gl.GLvoidp(16))
-        gl.glEnableVertexAttribArray(2)
-        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, 44, gl.GLvoidp(32))
+        gl.glVertexAttribPointer(1, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, gl.GLvoidp(16))
         gl.glBindVertexArray(0)
         # Debug boundary cylinder (split-radius overlay, key B):
         # same 8-float layout as the horizon ring, dynamic.
@@ -924,7 +922,7 @@ class MainWindow(QMainWindow):
         self._status.setStyleSheet(self._hud.styleSheet())
         self._status.move(10, 44)
         self._gl.on_hud = self._set_status
-        self._gl.on_escape_menu = self._open_menu
+        self._gl.on_escape_menu = self._toggle_menu
         self._menu = self._build_menu()
         self._menu.hide()
 
@@ -977,6 +975,15 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
         panel.adjustSize()
         return panel
+
+    def _toggle_menu(self) -> None:
+        # Esc is a toggle: in the world it opens the menu;
+        # with the menu up it acts as Resume (close and
+        # recapture), whichever widget holds focus.
+        if self._menu.isVisible():
+            self._close_menu()
+        else:
+            self._open_menu()
 
     def _close_menu(self) -> None:
         # Back to the world, Minecraft-style: the mouse is
