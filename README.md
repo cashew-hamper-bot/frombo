@@ -197,10 +197,15 @@ out, and there is no giant finite quad to clip or z-fight.
   everywhere, a constant medium dark green/brown
   (TERRAIN_COLOUR): with one colour there is no colour
   blending left to get wrong, whatever the interpolation
-  does, so the fan is back to standard perspective-correct
-  interpolation and one lighting statistic (the diffuse
-  response integrated over a fan of normals tilted from
-  straight up to 45° toward the viewer). The elevation colour
+  does. The fan's lighting and haze are evaluated per
+  fragment, in the fragment shader, from the world position
+  reconstructed out of a homogeneous varying -- the plane
+  shaders' architecture: position interpolates exactly, and
+  nothing nonlinear (lighting statistic, distance haze) is
+  ever baked into a vertex colour and interpolated across
+  the finite/infinite divide. The lighting is one statistic
+  (the diffuse response integrated over a fan of normals
+  tilted from straight up to 45° toward the viewer). The elevation colour
   stops are parked in terrain.py until the bigger geometry
   is flawless; the sea
   is the transparent partner there, its alpha fading at the
