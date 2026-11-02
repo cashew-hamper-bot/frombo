@@ -48,16 +48,21 @@ class TerrainTests(unittest.TestCase):
         # Infinity points lie exactly on the horizon: their
         # direction is purely horizontal.
         self.assertTrue(np.all(outer[:, 1] == 0.0))
-        # The ring is opaque now (the sea carries the horizon
-        # mixture), and every vertex carries the one uniform
-        # lit-mean colour: horizon points are identical except
-        # for azimuth.
+        # The ring is opaque (the sea carries the horizon
+        # mixture).  Albedo: the outer (horizon) row is uniform
+        # and equal to the mean terrain colour; the inner row
+        # carries the local terrain colour at its azimuth.
         self.assertTrue(np.all(verts[:, 7] == 1.0))
-        lit = terrain.terrain_stats()["mean_lit_colour"]
-        # Uniform across all vertices, and equal to the lit mean.
-        self.assertEqual(float(np.abs(verts[:, 4:7] - verts[0, 4:7]).max()), 0.0)
+        mean = terrain.terrain_stats()["mean_colour"]
+        self.assertEqual(
+            float(np.abs(outer[:, 4:7] - outer[0, 4:7]).max()), 0.0)
         np.testing.assert_allclose(
-            verts[0, 4:7], np.array(lit, dtype=np.float32), atol=1e-6)
+            outer[0, 4:7], np.array(mean, dtype=np.float32), atol=1e-6)
+        np.testing.assert_allclose(
+            inner[0, 4:7],
+            np.array(terrain.colour_at(inner[0, 0], inner[0, 2]),
+                     dtype=np.float32),
+            atol=1e-6)
         r = np.hypot(inner[:, 0], inner[:, 2])
         np.testing.assert_allclose(r, terrain.OUTER_RADIUS, atol=1.0)
 
