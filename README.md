@@ -43,38 +43,30 @@ Python ≥ 3.10. Controls:
 | I J K L | move (right hand — for left-mousers), same plane |
 | Space / E / U | up |
 | C / Q / O | down |
-| drag, primary mouse button | look, grab-the-world style, glued to the cursor at infinity |
-| click (press + release, no drag) | toggle Minecraft-like mouse capture: hidden cursor, FPS look at the same angular scale |
+| click in the world | capture the mouse for looking (Minecraft mode: there is no drag-look) |
+| mouse move while captured | FPS look; Esc opens the menu and releases the mouse; Resume / Esc in the menu recaptures |
 | wheel | fly speed |
 | hold Shift | 10x speed boost while held (the HUD shows the boosted speed) |
 | G | toggle flat / Gouraud shading on the ground patch |
-| T | toggle the distant terrain (and its horizon ring) |
+| T | toggle the distant terrain (and its horizon fan) |
 | Y | toggle the ocean surface |
 | F | toggle the far depth pass (300 m to infinity) |
 | N | toggle the near depth pass (3 cm to 300 m) |
 | B | toggle the split-plane intersection lines (on bedrock and sea) |
-| Esc | release mouse capture; press again (uncaptured) for the options menu (Quit lives there) |
+| Esc | in the world: open the options menu; in the menu: back to the world (Quit lives in the menu) |
 
 Movement uses the view azimuth only — looking down and pressing W
-does not descend. Dragging uses the grab-the-world convention of
-panorama viewers and map apps, the opposite sense from FPS
-mouse-look: drag right pulls the world right, so the view turns
-left. The rotation per event comes from the analytic Jacobian of
-the glued-cursor condition (`look_delta` in `math3d.py`;
-derivation in `docs/look-jacobian.md`): an object at infinity
-stays glued to the pointer at any screen position, with no fixed
-radians-per-pixel rate — the same drag travels further at wide
-FOV edges than at the centre, as it should. The Jacobian is exact
-in the limit, with second-order error per step (worst measured
-0.015 degrees at chunky 6 px steps); an earlier exact per-event
-solver (matrix inversion plus an acos branch pick per event)
-felt jerky next to frame-integrated translation and is gone.
-The one singularity is the cursor ray parallel to the world Y
-axis (zenith/nadir through an off-centre cursor), where the
-formula's sigma term is clamped. `tools/look_harness.py`
-measures interaction smoothness directly: per-frame rotation
-increments for synthetic event streams, and glued-point drift
-over a drag.
+does not descend. Mouse look is Minecraft mode: click to capture,
+move to look, Esc for the menu — there is no drag-look state
+between looking and the menu. The captured rotation rate comes
+from the analytic look Jacobian evaluated at the screen centre
+(`look_delta` in `math3d.py`; derivation in
+`docs/look-jacobian.md`, written for the grab-the-world drag
+this project used to have): the centre rate carries the
+spherical 1/cos(pitch) yaw gain. `tools/look_harness.py`
+measures it directly: total captured yaw against the analytic
+expectation (ratio 1.0000) and per-frame increment smoothness
+for synthetic event streams.
 
 ## Performance harness
 
@@ -125,8 +117,14 @@ Distance haze —
 an exponential approach to the sky's horizon colour, capped at
 80%, approached asymptotically (12 km scale) — is a pure function of true view distance in every shader,
 so it agrees across the split and the boundary stays invisible.
-**F** / **N** toggle the passes; **B** shows where the split
-plane (a view-oriented plane at eye depth 300 m, not a cylinder
+The two projections overlap by 30 m around the split and the
+shaders discard fragments against a shared manual clip plane
+at 315 m eye depth (1 m of hysteresis where both passes draw
+and depth decides), so the hardware clips no longer define
+the boundary and no coverage gap can open along it; if that
+proves out, two separate depth buffers become a simplicity
+option again. **F** / **N** toggle the passes; **B** shows
+where that clip plane (a view-oriented plane, not a cylinder
 and not a sphere) intersects the world: magenta lines lying in
 the bedrock and sea planes along the crossing, depth-tested
 like the surfaces themselves. Esc opens an options menu with

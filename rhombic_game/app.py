@@ -55,7 +55,10 @@ FOV_Y = math.radians(70.0)
 # the look Jacobian is computed once, here (docs/look-jacobian.md).
 TAN_HALF_FOV = math.tan(FOV_Y / 2.0)
 NEAR_PLANE = 0.03  # near depth pass: 3 cm
-DEPTH_SPLIT = 300.0  # metres: near/far depth-pass boundary
+DEPTH_SPLIT = 300.0  # metres: nominal near/far depth-pass boundary
+SPLIT_OVERLAP = 30.0  # each projection reaches this far past the split
+CLIP_SPLIT = DEPTH_SPLIT + SPLIT_OVERLAP / 2.0  # shared manual clip plane, 315 m
+CLIP_HYSTERESIS = 0.5  # both passes draw within this band of the clip plane
 
 
 def _compile(kind: int, source: str) -> int:
@@ -133,9 +136,9 @@ class RDWidget(QOpenGLWidget):
         self._captured = False  # Minecraft-like mouse capture (FPS look)
         self._last_global = None  # last pointer global pos (capture)
         self._look_pending = [0.0, 0.0]  # captured deltas awaiting a frame
-        self._press_pos = None  # for click-vs-drag detection
+        # (Minecraft mode: no drag-look state -- the mouse is
+        # either captured for looking or free in the menu.)
         self._keys: set[int] = set()
-        self._last_mouse = None
         self._clock = QElapsedTimer()
         self.on_hud = None  # callable(str), set by the window
         self.on_escape_menu = None  # callable(), set by the window
@@ -466,7 +469,7 @@ class RDWidget(QOpenGLWidget):
             np.clip(self.camera.pitch - dpitch, -1.55, 1.55)
         )
 
-    def _draw_blocks(self, vp, cam_pos, sun) -> None:
+    def _draw_blocks(self, vp, cam_pos, sun, cam_fwd, clip_near=0.0, clip_far=0.0) -> None:
         """The local RD islands (block program), one merged mesh
         per island.  Drawn in both depth passes."""
         gl.glUseProgram(self._block_prog)
@@ -474,13 +477,16 @@ class RDWidget(QOpenGLWidget):
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamFwd"), 1, cam_fwd)
+        gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uClipNear"), clip_near)
+        gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uClipFar"), clip_far)
         gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uHazeColor"), 1, self._haze_col)
         for vao, count in self._patches:
             gl.glBindVertexArray(vao)
             gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
 
-    def _draw_bedrock(self, vp, cam_pos) -> None:
+    def _draw_bedrock(self, vp, cam_pos, cam_fwd, clip_near=0.0, clip_far=0.0) -> None:
         """The complete infinite bedrock plane (4 vertices).
 
         An ordinary depth-writing surface, in both passes: the
@@ -511,6 +517,9 @@ class RDWidget(QOpenGLWidget):
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
         gl.glUniform1f(gl.glGetUniformLocation(self._bedrock_prog, "uPlaneY"), planes.BEDROCK_Y)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamFwd"), 1, cam_fwd)
+        gl.glUniform1f(gl.glGetUniformLocation(self._bedrock_prog, "uClipNear"), clip_near)
+        gl.glUniform1f(gl.glGetUniformLocation(self._bedrock_prog, "uClipFar"), clip_far)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uHazeColor"), 1, self._haze_col)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
@@ -537,8 +546,18 @@ class RDWidget(QOpenGLWidget):
         # near = 0.1 and far = infinity, depth error at 10 km was
         # ~60 m -- the distant coastlines fought the sea.  At
         # near = 300 the same error is ~0.02 m.
-        vp_far = cam.view_projection(FOV_Y, w / h, DEPTH_SPLIT).astype(np.float32)
-        vp_near = cam.view_projection(FOV_Y, w / h, NEAR_PLANE, DEPTH_SPLIT).astype(np.float32)
+        # The two projections OVERLAP by SPLIT_OVERLAP metres
+        # around the split, and the shaders discard against a
+        # shared manual clip plane inside the overlap (see the
+        # block fragment shader): the hardware clips no longer
+        # define the boundary, so no coverage gap can open
+        # along it.  If this proves out, two separate depth
+        # buffers become a simplicity option again.
+        vp_far = cam.view_projection(FOV_Y, w / h, DEPTH_SPLIT - SPLIT_OVERLAP).astype(np.float32)
+        vp_near = cam.view_projection(FOV_Y, w / h, NEAR_PLANE, DEPTH_SPLIT + SPLIT_OVERLAP).astype(np.float32)
+        cam_fwd = (-cam.view_matrix()[2, :3]).astype(np.float32)
+        clip_near = float(CLIP_SPLIT + CLIP_HYSTERESIS)
+        clip_far = float(CLIP_SPLIT - CLIP_HYSTERESIS)
         vp = vp_far
         sun = _sun()
         # Below bedrock the sky palette turns nether-red (the sky
@@ -596,19 +615,19 @@ class RDWidget(QOpenGLWidget):
             # 3. Near pass: blocks and bedrock, 3 cm .. split.
             gl.glDepthRange(0.0, 0.5)
             if "blocks" not in self.disabled_passes:
-                self._draw_blocks(vp_near, cam_pos, sun)
+                self._draw_blocks(vp_near, cam_pos, sun, cam_fwd, clip_near=clip_near)
             if "bedrock" not in self.disabled_passes and self._show_bedrock:
-                self._draw_bedrock(vp_near, cam_pos)
+                self._draw_bedrock(vp_near, cam_pos, cam_fwd, clip_near=clip_near)
         gl.glDepthRange(0.5, 1.0)
 
         if "blocks" not in self.disabled_passes and self._show_far:
             # 4. Local RD ground (far pass; the near pass redraws
             # it with its own projection below).
-            self._draw_blocks(vp, cam_pos, sun)
+            self._draw_blocks(vp, cam_pos, sun, cam_fwd, clip_far=clip_far)
 
         if "bedrock" not in self.disabled_passes and self._show_far and self._show_bedrock:
             # 5. Complete infinite bedrock plane (4 vertices).
-            self._draw_bedrock(vp, cam_pos)
+            self._draw_bedrock(vp, cam_pos, cam_fwd, clip_far=clip_far)
 
         if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
             # 6. Distant terrain annulus (block program; uniforms
@@ -620,6 +639,9 @@ class RDWidget(QOpenGLWidget):
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
             gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
             gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamFwd"), 1, cam_fwd)
+            gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uClipNear"), 0.0)
+            gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uClipFar"), clip_far)
             gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uHazeColor"), 1, self._haze_col)
             tvao, tcount = self._terrain_vao
             gl.glBindVertexArray(tvao)
@@ -628,7 +650,7 @@ class RDWidget(QOpenGLWidget):
 
         if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
             # 7. The horizon fan: triangles from the mesh's own
-            # outer edge loop (its true boundary vertices) to 12
+            # outer edge loop (its true boundary vertices) to 180
             # horizon vertices at infinity.  Finite, depth-
             # writing geometry in the ordinary way -- its inner
             # edge is watertight with the mesh because it IS the
@@ -664,6 +686,9 @@ class RDWidget(QOpenGLWidget):
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
             gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uPlaneY"), planes.SEA_Y)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamFwd"), 1, cam_fwd)
+            gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uClipNear"), 0.0)
+            gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uClipFar"), clip_far)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
             gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uHorizonAlpha"), self._sea_horizon_alpha)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uHazeColor"), 1, self._haze_col)
@@ -687,8 +712,8 @@ class RDWidget(QOpenGLWidget):
 
         if self._show_boundary:
             # 9. Debug overlay: where the split plane meets the
-            # world.  The boundary is the view plane at eye
-            # depth = split; a translucent quad on that plane
+            # world.  The boundary is the view plane at the
+            # manual clip plane inside the overlap; a translucent quad on that plane
             # showed nothing useful (it fills the view and, with
             # depth test off, floats over everything).  What
             # locates the boundary is its INTERSECTION with the
@@ -702,7 +727,7 @@ class RDWidget(QOpenGLWidget):
             view = cam.view_matrix()
             upv, back = view[1, :3], view[2, :3]
             fwd = -back
-            centre = cam.position + fwd * DEPTH_SPLIT
+            centre = cam.position + fwd * CLIP_SPLIT
             d = np.array([-fwd[2], 0.0, fwd[0]])
             dn = float(np.linalg.norm(d))
             rows = []
@@ -743,7 +768,7 @@ class RDWidget(QOpenGLWidget):
         if self.on_hud is not None and self._frame % 6 == 0:
             p = cam.position
             boost = "  x10 BOOST" if self._boost > 1.0 else ""
-            mode = "  MOUSE CAPTURED (Esc to release)" if self._captured else ""
+            mode = "  MOUSE CAPTURED (Esc for menu)" if self._captured else ""
             if not self._show_terrain:
                 mode += "  [terrain off]"
             if not self._show_sea:
@@ -770,13 +795,14 @@ class RDWidget(QOpenGLWidget):
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            # Esc leaves mouse capture first; pressed while
-            # uncaptured it opens the options menu (which has
-            # the Quit button).  Esc in the menu closes it --
-            # handled by the window, which owns the menu.
+            # Minecraft mode: Esc while captured leaves the
+            # world for the options menu (releasing the mouse);
+            # Esc in the menu returns to the world and
+            # recaptures -- handled by the window, which owns
+            # the menu.
             if self._captured:
                 self._set_captured(False)
-            elif self.on_escape_menu is not None:
+            if self.on_escape_menu is not None:
                 self.on_escape_menu()
             else:
                 self.window().close()
@@ -826,13 +852,11 @@ class RDWidget(QOpenGLWidget):
         self.update()
 
     def mousePressEvent(self, event) -> None:
-        if self._captured:
-            # A click while captured releases back to grab-the-world.
-            self._set_captured(False)
-            super().mousePressEvent(event)
-            return
-        self._last_mouse = event.position()
-        self._press_pos = event.position()
+        # Minecraft mode: a click in the world captures the
+        # mouse for looking.  There is no drag-look and no
+        # click-to-release: Esc is the way out (to the menu).
+        if not self._captured:
+            self._set_captured(True)
         self.setFocus()
         super().mousePressEvent(event)
 
@@ -862,43 +886,7 @@ class RDWidget(QOpenGLWidget):
                 self.update()
             super().mouseMoveEvent(event)
             return
-        if self._last_mouse is not None and (
-            event.buttons() & Qt.MouseButton.LeftButton
-        ):
-            # Grab-the-world drag via the analytic look Jacobian
-            # (docs/look-jacobian.md): the world direction under
-            # the cursor stays glued to it, at any screen position.
-            pos = event.position()
-            dx = float(pos.x() - self._last_mouse.x())
-            dy = float(pos.y() - self._last_mouse.y())
-            if dx != 0.0 or dy != 0.0:
-                w, h, k = self._look_params()
-                x = (w / h) * TAN_HALF_FOV * (2.0 * float(pos.x()) / w - 1.0)
-                y = TAN_HALF_FOV * (1.0 - 2.0 * float(pos.y()) / h)
-                dyaw, dpitch = look_delta(
-                    self.camera.pitch, x, y, dx, dy, k
-                )
-                self.camera.yaw += dyaw
-                self.camera.pitch = float(
-                    np.clip(self.camera.pitch + dpitch, -1.55, 1.55)
-                )
-                self.update()
-        self._last_mouse = event.position()
-        super().mouseMoveEvent(event)
-
     def mouseReleaseEvent(self, event) -> None:
-        # A click (press + release without dragging) toggles the
-        # Minecraft-like mouse capture.
-        if (
-            not self._captured
-            and self._press_pos is not None
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            moved = event.position() - self._press_pos
-            if moved.manhattanLength() < 5.0:
-                self._set_captured(True)
-        self._press_pos = None
-        self._last_mouse = None
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
@@ -925,7 +913,7 @@ class MainWindow(QMainWindow):
         )
         self._hud.setText(
             "WASD / IJKL move (horizontal plane) - Space up, C down - "
-            "drag world to look - wheel: speed - G: flat/Gouraud - Esc: menu"
+            "click to capture mouse - wheel: speed - G: flat/Gouraud - Esc: menu"
         )
         self._hud.move(10, 10)
         self._hud.adjustSize()
@@ -934,7 +922,7 @@ class MainWindow(QMainWindow):
         self._status.setStyleSheet(self._hud.styleSheet())
         self._status.move(10, 44)
         self._gl.on_hud = self._set_status
-        self._gl.on_escape_menu = self._toggle_menu
+        self._gl.on_escape_menu = self._open_menu
         self._menu = self._build_menu()
         self._menu.hide()
 
@@ -979,7 +967,7 @@ class MainWindow(QMainWindow):
         self._menu_checks["_smooth"] = smooth
         row = QHBoxLayout()
         resume = QPushButton("Resume")
-        resume.clicked.connect(self._toggle_menu)
+        resume.clicked.connect(self._close_menu)
         quit_btn = QPushButton("Quit")
         quit_btn.clicked.connect(self.close)
         row.addWidget(resume)
@@ -988,10 +976,15 @@ class MainWindow(QMainWindow):
         panel.adjustSize()
         return panel
 
-    def _toggle_menu(self) -> None:
+    def _close_menu(self) -> None:
+        # Back to the world, Minecraft-style: the mouse is
+        # recaptured for looking.
+        self._menu.hide()
+        self._gl.setFocus()
+        self._gl._set_captured(True)
+
+    def _open_menu(self) -> None:
         if self._menu.isVisible():
-            self._menu.hide()
-            self._gl.setFocus()
             return
         # Sync the checkboxes from the live flags (keyboard
         # toggles may have changed them since the last opening).
@@ -1014,7 +1007,7 @@ class MainWindow(QMainWindow):
         # Esc closes the menu when a menu widget holds focus
         # (otherwise the GL widget's own Esc handling runs).
         if event.key() == Qt.Key.Key_Escape and self._menu.isVisible():
-            self._toggle_menu()
+            self._close_menu()
             return
         super().keyPressEvent(event)
 
