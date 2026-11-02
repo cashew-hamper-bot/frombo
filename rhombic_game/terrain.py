@@ -95,10 +95,7 @@ def terrain_stats() -> dict:
     (samples at or above SEA_Y) equals TARGET_LAND_FRACTION --
     which puts the median elevation below sea level, like
     Earth's ocean-dominated surface.  Also computes the mean
-    terrain colour and that colour lit as if the surface normal
-    were straight up (the horizon ring's shading: every horizon
-    point represents the whole disc, so it is identical at every
-    azimuth).
+    terrain colour (the horizon ring's far albedo).
     """
     global _STATS
     if _STATS is not None:
@@ -119,18 +116,6 @@ def terrain_stats() -> dict:
     sea_fraction = float(np.mean([1.0 if h < SEA_Y else 0.0 for h in heights]))
     colours = [_base_colour(h) for h in heights]
     mean_colour = tuple(float(np.mean([c[k] for c in colours])) for k in range(3))
-    # Lit mean: the block shader's lighting with n = (0, 1, 0),
-    # AO = 1 -- hemisphere sky term, flat minimum ambient, sun.
-    from . import shaders as _sh
-
-    sun = np.array(_sh.SUN_DIR, dtype=float)
-    sun = sun / float(np.linalg.norm(sun))
-    ndl = float(sun[1])
-    lit = tuple(
-        mean_colour[k] * ((0.50, 0.64, 0.88)[k] + 0.16
-                          + (1.0, 0.93, 0.80)[k] * ndl * 0.95)
-        for k in range(3)
-    )
     _STATS = {
         "offset": offset,
         "mean_elevation": float(np.mean(heights)),
@@ -138,7 +123,6 @@ def terrain_stats() -> dict:
         "sea_fraction": sea_fraction,
         "land_fraction": 1.0 - sea_fraction,
         "mean_colour": mean_colour,
-        "mean_lit_colour": lit,
     }
     return _STATS
 
@@ -246,24 +230,31 @@ def build_horizon_ring() -> tuple[np.ndarray, np.ndarray]:
     """Strip from the OUTER_RADIUS circle to infinity.
 
     Vertex format: (aHomog vec4, aColor vec4) -- 8 floats.
-    Every vertex carries ONE colour: the mean terrain colour,
-    lit with the normal straight up.  A horizon point represents
-    the entire disc, so horizon points are identical except for
-    azimuth; the land/sea mixture at the horizon is carried not
-    here but in the sea's horizon alpha (the sea is the
-    transparent partner in a sea-dominant world, and it is drawn
-    after this ring).  Inner vertices are finite (w = 1); outer
-    vertices are purely horizontal directions (w = 0, y = 0),
-    exactly on the horizon line.
+    The attribute carries ALBEDO: the local terrain colour on
+    the inner edge, the disc's mean terrain colour on the outer
+    (horizon) edge.  Lighting happens in the horizon shader,
+    which integrates the diffuse response over a fan of
+    representative normals tilted from straight up to 45
+    degrees toward the viewer -- a horizon point represents
+    the entire disc, and the visible far terrain presents
+    exactly such a fan (ridges facing us; lower ground is
+    occluded behind higher ground along the same sightline).
+    The land/sea mixture at the horizon is carried not here but
+    in the sea's horizon alpha (the sea is the transparent
+    partner in a sea-dominant world, drawn after this ring).
+    Inner vertices are finite (w = 1); outer vertices are
+    purely horizontal directions (w = 0, y = 0), exactly on
+    the horizon line.
     """
-    lit = terrain_stats()["mean_lit_colour"]
+    mean = terrain_stats()["mean_colour"]
     rows = []
     for i in range(HORIZON_SEGMENTS + 1):
         th = 2.0 * math.pi * i / HORIZON_SEGMENTS
         x, z = OUTER_RADIUS * math.cos(th), OUTER_RADIUS * math.sin(th)
         h = height(x, z)
-        rows.append((x, h, z, 1.0, lit[0], lit[1], lit[2], 1.0))
-        rows.append((x, 0.0, z, 0.0, lit[0], lit[1], lit[2], 1.0))
+        c = colour_at(x, z)
+        rows.append((x, h, z, 1.0, c[0], c[1], c[2], 1.0))
+        rows.append((x, 0.0, z, 0.0, mean[0], mean[1], mean[2], 1.0))
     verts = np.array(rows, dtype=np.float32)
     idx = []
     for i in range(HORIZON_SEGMENTS):

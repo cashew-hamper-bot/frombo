@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from rhombic_game import planes
+from rhombic_game import math3d, planes
 from rhombic_game.lattice import (
     NEIGHBOR_OFFSETS,
     FccCoord,
@@ -466,3 +466,16 @@ class SandyAndAOTests(unittest.TestCase):
 
         self.assertEqual(len(island_cells_100()), 533)
         self.assertEqual(len(island_cells_111()), 523)
+
+
+class PerspectiveTests(unittest.TestCase):
+    def test_finite_projection_endpoints(self):
+        p = math3d.perspective_finite(math.radians(60.0), 1.5, 0.03, 300.0)
+
+        def ndc_z(d):
+            v = p @ np.array([0.0, 0.0, -d, 1.0])
+            return v[2] / v[3]
+
+        self.assertAlmostEqual(ndc_z(0.03), -1.0, places=6)
+        self.assertAlmostEqual(ndc_z(300.0), 1.0, places=6)
+        self.assertLess(ndc_z(3.0), ndc_z(30.0))

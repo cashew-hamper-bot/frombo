@@ -45,7 +45,8 @@ FOV_Y = math.radians(70.0)
 # The projection never changes, so its one derived constant for
 # the look Jacobian is computed once, here (docs/look-jacobian.md).
 TAN_HALF_FOV = math.tan(FOV_Y / 2.0)
-NEAR = 0.1
+NEAR_PLANE = 0.03  # near depth pass: 3 cm
+DEPTH_SPLIT = 300.0  # metres: near/far depth-pass boundary
 
 
 def _compile(kind: int, source: str) -> int:
@@ -108,6 +109,10 @@ class RDWidget(QOpenGLWidget):
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._show_terrain = True  # distant terrain + horizon ring (T toggles)
         self._show_sea = True  # ocean surface (Y toggles)
+        self._show_far = True  # far depth pass, split..infinity (F toggles)
+        self._show_near = True  # near depth pass, 3 cm..split (N toggles)
+        self._show_boundary = False  # split-boundary debug cylinder (B toggles)
+        self._haze_col = np.array(shaders.HAZE_COLOR, dtype=np.float32)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._look_size = None  # (w, h) cached by resizeGL for look math
         # Instrumentation for tools/perf_harness.py: names of
@@ -194,6 +199,17 @@ class RDWidget(QOpenGLWidget):
         gl.glBufferData(gl.GL_ARRAY_BUFFER, hverts.nbytes, hverts, gl.GL_STATIC_DRAW)
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, hebo)
         gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, hidx.nbytes, hidx, gl.GL_STATIC_DRAW)
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, None)
+        gl.glEnableVertexAttribArray(1)
+        gl.glVertexAttribPointer(1, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, gl.GLvoidp(16))
+        gl.glBindVertexArray(0)
+        # Debug boundary cylinder (split-radius overlay, key B):
+        # same 8-float layout as the horizon ring, dynamic.
+        self._debug_vao = gl.glGenVertexArrays(1)
+        self._debug_vbo = gl.glGenBuffers(1)
+        gl.glBindVertexArray(self._debug_vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._debug_vbo)
         gl.glEnableVertexAttribArray(0)
         gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, None)
         gl.glEnableVertexAttribArray(1)
@@ -439,6 +455,20 @@ class RDWidget(QOpenGLWidget):
             np.clip(self.camera.pitch - dpitch, -1.55, 1.55)
         )
 
+    def _draw_blocks(self, vp, cam_pos, sun) -> None:
+        """The local RD islands (block program), one merged mesh
+        per island.  Drawn in both depth passes."""
+        gl.glUseProgram(self._block_prog)
+        gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uHazeColor"), 1, self._haze_col)
+        for vao, count in self._patches:
+            gl.glBindVertexArray(vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
+        gl.glBindVertexArray(0)
+
     def _draw_bedrock(self, vp, cam_pos) -> None:
         """The complete infinite bedrock plane (4 vertices).
 
@@ -467,6 +497,7 @@ class RDWidget(QOpenGLWidget):
         gl.glUseProgram(self._bedrock_prog)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
+        gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uHazeColor"), 1, self._haze_col)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
         gl.glUniform1i(gl.glGetUniformLocation(self._bedrock_prog, "uTex"), 0)
@@ -486,7 +517,15 @@ class RDWidget(QOpenGLWidget):
         dpr = self.devicePixelRatioF()
         w, h = max(1, int(self.width() * dpr)), max(1, int(self.height() * dpr))
         gl.glViewport(0, 0, w, h)
-        vp = cam.view_projection(FOV_Y, w / h, NEAR).astype(np.float32)
+        # Two depth passes share the frame: the FAR pass (split
+        # .. infinity, infinite projection with near = split) and
+        # the NEAR pass (3 cm .. split, finite projection).  With
+        # near = 0.1 and far = infinity, depth error at 10 km was
+        # ~60 m -- the distant coastlines fought the sea.  At
+        # near = 300 the same error is ~0.02 m.
+        vp_far = cam.view_projection(FOV_Y, w / h, DEPTH_SPLIT).astype(np.float32)
+        vp_near = cam.view_projection(FOV_Y, w / h, NEAR_PLANE, DEPTH_SPLIT).astype(np.float32)
+        vp = vp_far
         sun = _sun()
         # Below bedrock the sky palette turns nether-red (the sky
         # shader's uUnder fade).  There is no haze anywhere to tint.
@@ -496,12 +535,19 @@ class RDWidget(QOpenGLWidget):
         # descend" from just underneath, which is wrong -- below
         # is below).
         under = float(np.clip((planes.BEDROCK_Y - cam.position[1]) / 1.0, 0.0, 1.0))
+        # The haze colour is the sky's current horizon colour:
+        # day colour above bedrock, nether colour below it.
+        self._haze_col = np.array(
+            [(1.0 - under) * c + under * n
+             for c, n in zip(shaders.HAZE_COLOR, shaders.NETHER_HAZE_COLOR)],
+            dtype=np.float32,
+        )
         cam_pos = cam.position.astype(np.float32)
 
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
         gl.glDisable(gl.GL_CULL_FACE)
 
-        if "sky" not in self.disabled_passes:
+        if "sky" not in self.disabled_passes and self._show_far:
             # 1. Sky at infinity: depth exactly 1.0, drawn first, no depth write.
             gl.glDepthMask(gl.GL_FALSE)
             gl.glDepthFunc(gl.GL_LEQUAL)
@@ -517,37 +563,32 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDepthFunc(gl.GL_LESS)
 
-        if "blocks" not in self.disabled_passes:
-            # 2. Local RD ground.
-            gl.glUseProgram(self._block_prog)
-            gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
-            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
-            for vao, count in self._patches:
-                gl.glBindVertexArray(vao)
-                gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
-            gl.glBindVertexArray(0)
+        if "blocks" not in self.disabled_passes and self._show_far:
+            # 2. Local RD ground (far pass; the near pass redraws
+            # it with its own projection below).
+            self._draw_blocks(vp, cam_pos, sun)
 
-        if "bedrock" not in self.disabled_passes:
+        if "bedrock" not in self.disabled_passes and self._show_far:
             # 3. Complete infinite bedrock plane (4 vertices).
             self._draw_bedrock(vp, cam_pos)
 
-        if "terrain" not in self.disabled_passes and self._show_terrain:
+        if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
             # 4. Distant terrain annulus (block program; uniforms
             # set here so the pass stands alone when "blocks" is
-            # disabled by the perf harness).
+            # disabled by the perf harness).  Far pass only: the
+            # annulus starts at 1.5 km, beyond the split.
             gl.glUseProgram(self._block_prog)
             gl.glUniform1f(gl.glGetUniformLocation(self._block_prog, "uSmooth"), self._smooth)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._block_prog, "uVP"), 1, gl.GL_TRUE, vp)
             gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uSunDir"), 1, sun)
             gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._block_prog, "uHazeColor"), 1, self._haze_col)
             tvao, tcount = self._terrain_vao
             gl.glBindVertexArray(tvao)
             gl.glDrawElements(gl.GL_TRIANGLES, tcount, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
 
-        if "terrain" not in self.disabled_passes and self._show_terrain:
+        if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
             # 5. Terrain horizon ring at infinity: one uniform
             # statistical colour, identical at every azimuth
             # (each horizon point represents the whole disc),
@@ -562,13 +603,17 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glUseProgram(self._horizon_prog)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uSunDir"), 1, sun)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uHazeColor"), 1, self._haze_col)
+            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 0.0)
             gl.glBindVertexArray(self._horizon_vao)
             gl.glDrawElements(gl.GL_TRIANGLES, self._horizon_count, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDepthFunc(gl.GL_LESS)
 
-        if "sea" not in self.disabled_passes and self._show_sea:
+        if "sea" not in self.disabled_passes and self._show_sea and self._show_far:
             # 6. The sea, drawn last of the infinity family
             # (slightly transparent; painter's order keeps the
             # blending simple).  LEQUAL so that at the horizon,
@@ -587,6 +632,7 @@ class RDWidget(QOpenGLWidget):
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
             gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uHorizonAlpha"), self._sea_horizon_alpha)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uHazeColor"), 1, self._haze_col)
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
             gl.glUniform1i(gl.glGetUniformLocation(self._sea_prog, "uTex"), 0)
@@ -599,11 +645,57 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthFunc(gl.GL_LESS)
             gl.glDisable(gl.GL_BLEND)
 
-        if "bedrock" not in self.disabled_passes and cam.position[1] < planes.BEDROCK_Y:
+        if "bedrock" not in self.disabled_passes and self._show_far and cam.position[1] < planes.BEDROCK_Y:
             # 7. Below bedrock, the bedrock is the nearest of the
             # infinity family overhead, so painter's algorithm
             # wants it last: draw it again, over the sea and sky.
             self._draw_bedrock(vp, cam_pos)
+
+        if self._show_near:
+            # 8. Near pass: the blocks and bedrock again, with
+            # the near projection.  Colour is not cleared -- near
+            # geometry is nearer than anything the far pass drew,
+            # so drawing after is itself the visibility test for
+            # the overlap; only depth is cleared, so the near
+            # range gets the near pass's own precision.
+            gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
+            if "blocks" not in self.disabled_passes:
+                self._draw_blocks(vp_near, cam_pos, sun)
+            if "bedrock" not in self.disabled_passes:
+                self._draw_bedrock(vp_near, cam_pos)
+
+        if self._show_boundary:
+            # 9. Debug overlay: a translucent magenta fence at
+            # the split radius around the camera, marking where
+            # the near pass hands over to the far pass.  A full
+            # cylinder would tint the whole view (the infinity
+            # family writes no depth for it to test against), so
+            # the fence is a band straddling the world's active
+            # heights: it reads as a wall standing on the sea and
+            # terrain at exactly the split distance.
+            seg = 96
+            rows = []
+            for i in range(seg + 1):
+                th = 2.0 * math.pi * i / seg
+                x = cam.position[0] + DEPTH_SPLIT * math.cos(th)
+                z = cam.position[2] + DEPTH_SPLIT * math.sin(th)
+                rows.append((x, -30.0, z, 1.0, 1.0, 0.0, 1.0, 0.30))
+                rows.append((x, 90.0, z, 1.0, 1.0, 0.0, 1.0, 0.30))
+            data = np.array(rows, dtype=np.float32)
+            gl.glBindVertexArray(self._debug_vao)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._debug_vbo)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_DRAW)
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            gl.glDepthMask(gl.GL_FALSE)
+            gl.glUseProgram(self._horizon_prog)
+            vp_over = cam.view_projection(FOV_Y, w / h, NEAR_PLANE).astype(np.float32)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp_over)
+            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 1.0)
+            gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, len(rows))
+            gl.glBindVertexArray(0)
+            gl.glDepthMask(gl.GL_TRUE)
+            gl.glDisable(gl.GL_BLEND)
 
         self._frame += 1
         if self.on_hud is not None and self._frame % 6 == 0:
@@ -614,6 +706,12 @@ class RDWidget(QOpenGLWidget):
                 mode += "  [terrain off]"
             if not self._show_sea:
                 mode += "  [sea off]"
+            if not self._show_far:
+                mode += "  [far off]"
+            if not self._show_near:
+                mode += "  [near off]"
+            if self._show_boundary:
+                mode += "  [split shown]"
             self.on_hud(
                 f"pos ({p[0]:7.1f}, {p[1]:6.1f}, {p[2]:7.1f})   "
                 f"speed {cam.move_speed * self._boost:5.1f} m/s{boost}   "
@@ -644,6 +742,15 @@ class RDWidget(QOpenGLWidget):
             self.update()
         if event.key() == Qt.Key.Key_Y and not event.isAutoRepeat():
             self._show_sea = not self._show_sea
+            self.update()
+        if event.key() == Qt.Key.Key_F and not event.isAutoRepeat():
+            self._show_far = not self._show_far
+            self.update()
+        if event.key() == Qt.Key.Key_N and not event.isAutoRepeat():
+            self._show_near = not self._show_near
+            self.update()
+        if event.key() == Qt.Key.Key_B and not event.isAutoRepeat():
+            self._show_boundary = not self._show_boundary
             self.update()
             self.update()
             return

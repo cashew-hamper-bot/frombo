@@ -4,17 +4,23 @@
           w = 0; colour is a function of direction alone.
 - planes: homogeneous positions.  The fragment shader recovers the
           world point as xyz / w, exact at every distance.
-- blocks: the one ordinary finite renderer, for local geometry --
-          but still projected with the infinite projection matrix.
+- blocks: the one ordinary finite renderer, for local geometry.
+          The scene renders in two depth passes (near/far split
+          at 300 m); each pass has its own projection.
 """
 
 SUN_DIR = (-0.45, 0.62, -0.35)  # static daytime sun (normalised in shader)
-# The sky gradient's horizon colour, also used as the GL clear
-# colour.  Nothing in the scene is distance-hazed: haze is a hack
-# for masking the limits of finite renderers, and this renderer is
-# infinity-first -- the planes run pattern-crisp to the true
-# horizon and meet the sky there directly.
-HAZE_COLOR = (0.78, 0.86, 0.94)  # (name kept; it is the horizon colour now)
+
+# Sky colours.  Distance haze (restored 2026-11-02 at
+# Christopher's direction, reversing the earlier no-haze rule):
+# an exponential approach to the sky's horizon colour, capped
+# at 90% so the far field never quite dissolves into the sky.
+# The haze factor is a pure function of true view distance in
+# every shader, so it agrees across the near/far depth split.
+HAZE_COLOR = (0.78, 0.86, 0.94)  # the sky horizon colour; also the haze colour
+NETHER_HAZE_COLOR = (0.40, 0.11, 0.04)  # the nether horizon colour below bedrock
+HAZE_MAX = 0.90
+HAZE_SCALE = 3500.0  # metres; the exponential approach scale
 
 SKY_VERT = """
 #version 330 core
@@ -89,6 +95,7 @@ in vec4 vHomog;
 uniform vec3 uCamPos;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
+uniform vec3 uHazeColor;
 out vec4 fragColor;
 
 void main() {
@@ -109,8 +116,8 @@ void main() {
     float n = texture(uNoise, wp.xz / 500.0).r;
     col *= mix(1.0, 0.88 + 0.24 * n, smoothstep(60.0, 600.0, dist));
 
-    // No distance haze, by design (infinity-first: the pattern
-    // runs crisp to the true horizon).
+    // Distance haze, capped at 90% (see the block shader).
+    col = mix(col, uHazeColor, 0.90 * (1.0 - exp(-dist / 3500.0)));
     fragColor = vec4(col, 1.0);
 }
 """
@@ -124,6 +131,7 @@ uniform vec3 uSunDir;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
 uniform float uHorizonAlpha;
+uniform vec3 uHazeColor;
 out vec4 fragColor;
 """
     + """
@@ -155,8 +163,9 @@ void main() {
     float sheen = pow(max(dot(vec3(0.0, 1.0, 0.0), halfVec), 0.0), 8.0);
     col += vec3(0.5, 0.6, 0.7) * sheen * 0.08;
 
-    // No distance haze, by design (see the bedrock shader).
-    // But alpha carries statistics at the horizon: the sea is
+    // Colour haze, capped at 90% (see the block shader).
+    col = mix(col, uHazeColor, 0.90 * (1.0 - exp(-dist / 3500.0)));
+    // Alpha carries statistics at the horizon: the sea is
     // the transparent partner there, so its opacity fades to
     // uHorizonAlpha = sea_fraction x base opacity -- equivalently
     // horizon transparency = land_fraction + sea_fraction x
@@ -199,6 +208,7 @@ in vec3 vWorld;
 in float vAO;
 uniform vec3 uSunDir;
 uniform vec3 uCamPos;
+uniform vec3 uHazeColor;
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(vNormal);
@@ -217,6 +227,11 @@ void main() {
     // normal (uSmooth picks flat vs smooth interpolation).  No
     // specular term: sand is matte, and specular is not what
     // "interpolated normals" was asking for.
+    // Distance haze toward the sky colour, capped at 90%: a
+    // pure function of true distance, identical in both depth
+    // passes, so the near/far boundary stays invisible.
+    float dist = length(vWorld - uCamPos);
+    col = mix(col, uHazeColor, 0.90 * (1.0 - exp(-dist / 3500.0)));
     fragColor = vec4(col, 1.0);
 }
 """
@@ -226,9 +241,47 @@ HORIZON_VERT = """
 layout(location = 0) in vec4 aHomog;
 layout(location = 1) in vec4 aColor;
 uniform mat4 uVP;
+uniform vec3 uSunDir;
+uniform vec3 uCamPos;
+uniform vec3 uHazeColor;
+uniform float uDebug;
 out vec4 vColor;
 void main() {
-    vColor = aColor;
+    vec3 lit = aColor.rgb;
+    float hazeF = 0.90;
+    if (uDebug > 0.5) {
+        hazeF = 0.0;
+    } else if (aHomog.w > 0.5) {
+        float dist = length(aHomog.xyz - uCamPos);
+        hazeF = 0.90 * (1.0 - exp(-dist / 3500.0));
+    }
+    if (uDebug < 0.5) {
+        // Representative-normal lighting for a horizon point:
+        // integrate the diffuse response over normals tilted
+        // from straight up to 45 degrees toward the viewer.
+        // The far terrain actually presents such a fan of
+        // normals -- every ridge facing us at every tilt, with
+        // lower ground occluded behind it -- so the horizon
+        // colour is that fan's average response, not the
+        // flat-up response (which reads too bright).
+        vec2 toViewer = aHomog.w > 0.5
+            ? normalize(uCamPos.xz - aHomog.xz)
+            : normalize(-aHomog.xz);
+        vec3 sunDir = normalize(uSunDir);
+        vec3 acc = vec3(0.0);
+        for (int i = 0; i < 4; i++) {
+            float tilt = radians(15.0 * float(i));
+            vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
+                                    toViewer.y * sin(tilt)));
+            vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
+                            0.5 + 0.5 * n.y);
+            acc += hemi + vec3(0.16)
+                 + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
+        }
+        lit = aColor.rgb * (acc / 4.0);
+        lit = mix(lit, uHazeColor, hazeF);
+    }
+    vColor = vec4(lit, aColor.a);
     gl_Position = uVP * aHomog;
 }
 """

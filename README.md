@@ -50,6 +50,9 @@ Python ≥ 3.10. Controls:
 | G | toggle flat / Gouraud shading on the ground patch |
 | T | toggle the distant terrain (and its horizon ring) |
 | Y | toggle the ocean surface |
+| F | toggle the far depth pass (300 m to infinity) |
+| N | toggle the near depth pass (3 cm to 300 m) |
+| B | toggle the split-boundary debug fence at 300 m |
 | Esc | release mouse capture; press again (uncaptured) to quit |
 
 Movement uses the view azimuth only — looking down and pressing W
@@ -106,6 +109,20 @@ perspective matrix at the limit far → ∞: the third row becomes
 `[0, 0, -1, -2·near]`. A finite point's NDC z approaches +1 as it
 recedes but never reaches it; a direction (w = 0) straight ahead maps
 to NDC z *exactly* +1.
+
+**Two depth passes.** One infinite projection (near = 0.1) leaves
+~60 m of depth error at 10 km — distant coastlines fought the sea
+plane for the same depth values. The scene now renders twice per
+frame with a split at 300 m: a *far pass* (300 m to infinity, the
+infinite projection with near = 300; depth error at 10 km ≈ 0.02 m)
+holding the sky, planes, terrain, ring and sea, then a *near pass*
+(3 cm to 300 m, ordinary finite projection) redrawing the local
+islands and bedrock into a cleared depth buffer. Distance haze —
+an exponential approach to the sky's horizon colour, capped at
+90% — is a pure function of true view distance in every shader,
+so it agrees across the split and the boundary stays invisible.
+**F** / **N** toggle the passes; **B** shows a magenta fence at
+the split radius.
 
 **Skybox** (`planes.skybox_cube`, `shaders.SKY_*`): the cube's
 vertices are direction vectors, submitted as `vec4(dir, 0.0)`. The
