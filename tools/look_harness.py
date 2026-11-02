@@ -6,9 +6,11 @@ reports the numbers that "rotation feels jerky" has to answer to:
 - per-frame rotation increments during a constant-velocity
   captured-look stream: mean / std / min / max (a smooth stream
   has std near zero; steps and dropouts show up immediately);
-- total rotation vs the analytic expectation;
-- glued-point drift over a constant-velocity grab-the-world
-  drag, and the per-event step sizes along it.
+- total rotation vs the analytic expectation.
+
+(Minecraft mode removed grab-the-world drag-look, and with it
+this harness's drag scenario; captured look is the only mouse
+look, and the analytic centre-rate check below is its check.)
 
 Run under the same Xvfb/software-GL environment as the smoke
 render (it needs a real window for cursor warping):
@@ -30,8 +32,7 @@ from PySide6.QtCore import QEvent, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent, QSurfaceFormat  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from rhombic_game.app import FOV_Y, TAN_HALF_FOV, MainWindow  # noqa: E402
-from rhombic_game.math3d import ray_direction  # noqa: E402
+from rhombic_game.app import TAN_HALF_FOV, MainWindow  # noqa: E402
 
 
 def _move_event(gl_pos: QPointF, local_pos: QPointF, buttons) -> QMouseEvent:
@@ -91,46 +92,6 @@ def scenario_capture(gl, app) -> None:
     _report("per-frame |dyaw|", per_frame)
 
 
-def scenario_drag(gl, app) -> None:
-    """Straight-line grab-the-world drag; measure glued drift."""
-    print("drag: (200, 300) -> (824, 460) in 2 px steps, left button held")
-    gl.camera.yaw, gl.camera.pitch = 0.7, -0.3
-    w, h = float(gl.width()), float(gl.height())
-
-    def ndc(p: QPointF) -> tuple[float, float]:
-        return (2.0 * p.x() / w - 1.0, 1.0 - 2.0 * p.y() / h)
-
-    def direction_at(p: QPointF) -> np.ndarray:
-        inv = np.linalg.inv(gl.camera.view_projection(FOV_Y, w / h, 0.1))
-        return ray_direction(inv, *ndc(p))
-
-    start = QPointF(200.0, 300.0)
-    end = QPointF(824.0, 460.0)
-    target = direction_at(start)
-    gl._last_mouse = QPointF(start)
-    steps = 312
-    per_event: list[float] = []
-    prev = (gl.camera.yaw, gl.camera.pitch)
-    for s in range(1, steps + 1):
-        f = s / steps
-        p = QPointF(
-            start.x() + (end.x() - start.x()) * f,
-            start.y() + (end.y() - start.y()) * f,
-        )
-        gl.mouseMoveEvent(
-            _move_event(gl.mapToGlobal(p.toPoint()).toPointF(), p,
-                        Qt.MouseButton.LeftButton)
-        )
-        per_event.append(
-            abs(gl.camera.yaw - prev[0]) + abs(gl.camera.pitch - prev[1])
-        )
-        prev = (gl.camera.yaw, gl.camera.pitch)
-    got = direction_at(end)
-    drift = math.degrees(math.acos(float(np.clip(got @ target, -1, 1))))
-    print(f"  glued-point drift over the drag: {drift:.4f} deg")
-    _report("per-event |dyaw|+|dpitch|", per_event)
-
-
 def main() -> int:
     fmt = QSurfaceFormat()
     fmt.setVersion(4, 1)
@@ -150,7 +111,6 @@ def main() -> int:
     gl.doneCurrent()
 
     scenario_capture(gl, app)
-    scenario_drag(gl, app)
     return 0
 
 

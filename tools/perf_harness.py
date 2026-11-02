@@ -73,23 +73,30 @@ def pct(values: list[float], q: float) -> float:
 
 
 def run_cell(glw, app, frames: int, warmup: int) -> list[float]:
-    """Full-loop times (ms) for a drag gesture that keeps the
-    view rotating: a slow circle, so no pitch clamp engages and
-    every frame's scene differs from the last."""
+    """Full-loop times (ms) for a captured-look gesture that
+    keeps the view rotating: a slow circle of global cursor
+    positions, so every frame's scene differs from the last.
+    (Minecraft mode removed drag-look; the harness drives the
+    captured path, resetting the widget's last-global cursor
+    anchor each step so the measured deltas are incremental
+    despite the handler's recentering warps.)"""
     cx, cy, radius = 640.0, 400.0, 260.0
     total_steps = warmup + frames
     durations: list[float] = []
     prev_frame = glw._frame
-    glw._last_mouse = QPointF(cx + radius, cy)
+    center = glw.mapToGlobal(glw.rect().center()).toPointF()
+    glw._set_captured(True)
+    prev_pos = QPointF(cx + radius, cy)
     for step in range(total_steps):
         ang = 2.0 * math.pi * step / 240.0
         pos = QPointF(cx + radius * math.cos(ang), cy + radius * math.sin(ang))
+        glw._last_global = prev_pos
         event = QMouseEvent(
             QEvent.Type.MouseMove,
             pos,
-            glw.mapToGlobal(pos.toPoint()).toPointF(),
+            pos,
             Qt.MouseButton.NoButton,
-            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
             Qt.KeyboardModifier.NoModifier,
         )
         t0 = time.perf_counter()
@@ -101,7 +108,8 @@ def run_cell(glw, app, frames: int, warmup: int) -> list[float]:
         t1 = time.perf_counter()
         if step >= warmup:
             durations.append((t1 - t0) * 1000.0)
-    glw._last_mouse = None
+        prev_pos = pos
+    glw._set_captured(False)
     rendered = glw._frame - prev_frame
     if rendered < frames:
         print(f"    warning: only {rendered}/{frames} frames were painted")
