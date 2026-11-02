@@ -299,12 +299,25 @@ HORIZON_VERT = """
 #version 330 core
 layout(location = 0) in vec4 aHomog;
 layout(location = 1) in vec4 aColor;
+layout(location = 2) in vec3 aNormal;
 uniform mat4 uVP;
 uniform vec3 uSunDir;
 uniform vec3 uCamPos;
 uniform vec3 uHazeColor;
 uniform float uDebug;
-out vec4 vColor;
+// noperspective is load-bearing, not a flourish.  A horizon
+// vertex's clip w is ~cos(angle to the view forward) -- order
+// 1 -- while an edge vertex's is its view depth in metres --
+// order 10^3-10^4.  Perspective-correct interpolation weights
+// by 1/w, so the horizon vertex's colour outweighed the edge
+// colour roughly a thousand to one: every fan fragment came
+// out in the horizon colour, flat, all the way to the mesh
+// edge (measured: a 70-pixel band at a constant RGB, stepping
+// hard to the mesh's dark brown at the seam).  The fan is a
+// colour ramp, not a surface; screen-linear interpolation is
+// the ramp the design intends: the edge colour at the seam,
+// grading evenly across the band to the horizon colour.
+noperspective out vec4 vColor;
 void main() {
     vec3 lit = aColor.rgb;
     float hazeF = 0.80;
@@ -318,19 +331,18 @@ void main() {
         vec3 sunDir = normalize(uSunDir);
         vec3 light;
         if (aHomog.w > 0.5) {
-            // A finite edge vertex is real terrain, continuous
-            // with the mesh: light it exactly as the block
-            // shader lights an up-facing fragment (hemisphere
-            // sky colour + flat ambient + sun, AO = 1), so the
-            // fan's inner end matches the mesh's edge and the
-            // blend carries terrain colour outward.  (The
-            // earlier build lit edge vertices with the horizon
-            // statistic too -- dimmer and much bluer -- and the
-            // whole band washed to uniform pale gray; a pink
-            // diagnostic proved the colour plumbing was fine
-            // and the lighting response was the gray-maker.)
-            light = vec3(0.50, 0.64, 0.88) + vec3(0.16)
-                  + vec3(1.0, 0.93, 0.80) * max(sunDir.y, 0.0) * 0.95;
+            // A finite edge vertex is a mesh vertex: light it
+            // with the block shader's model evaluated with the
+            // vertex's own smooth normal and the RAW sun
+            // direction (the block shader does not normalize
+            // it), AO = 1 -- the same value the mesh computes
+            // at this point, so the fan continues the mesh's
+            // shading, not an approximation of it.
+            vec3 n = aNormal;
+            vec3 hemi = mix(vec3(0.34, 0.29, 0.24), vec3(0.50, 0.64, 0.88),
+                            0.5 + 0.5 * n.y);
+            light = hemi * (0.45 + 0.55 * 1.0) + vec3(0.16)
+                  + vec3(1.0, 0.93, 0.80) * max(dot(n, uSunDir), 0.0) * 0.95;
         } else {
             // Representative-normal lighting for a horizon
             // point: integrate the diffuse response over
@@ -364,7 +376,7 @@ void main() {
 
 HORIZON_FRAG = """
 #version 330 core
-in vec4 vColor;
+noperspective in vec4 vColor;
 out vec4 fragColor;
 void main() {
     fragColor = vColor;
