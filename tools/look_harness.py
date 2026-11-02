@@ -133,7 +133,7 @@ def scenario_drag(gl, app) -> None:
 
 def main() -> int:
     fmt = QSurfaceFormat()
-    fmt.setVersion(3, 3)
+    fmt.setVersion(4, 1)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setSamples(4)

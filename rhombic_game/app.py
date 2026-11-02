@@ -111,7 +111,7 @@ class RDWidget(QOpenGLWidget):
         self._show_sea = True  # ocean surface (Y toggles)
         self._show_far = True  # far depth pass, split..infinity (F toggles)
         self._show_near = True  # near depth pass, 3 cm..split (N toggles)
-        self._show_boundary = False  # split-boundary debug cylinder (B toggles)
+        self._show_boundary = False  # split-plane debug overlay (B toggles)
         self._haze_col = np.array(shaders.HAZE_COLOR, dtype=np.float32)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._look_size = None  # (w, h) cached by resizeGL for look math
@@ -469,7 +469,7 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawElements(gl.GL_TRIANGLES, count, gl.GL_UNSIGNED_INT, None)
         gl.glBindVertexArray(0)
 
-    def _draw_bedrock(self, vp, cam_pos) -> None:
+    def _draw_bedrock(self, vp, cam_pos, write_depth=False) -> None:
         """The complete infinite bedrock plane (4 vertices).
 
         Like every member of the infinity family, it writes no
@@ -493,7 +493,14 @@ class RDWidget(QOpenGLWidget):
             )
         )
         gl.glDepthFunc(gl.GL_LEQUAL)
-        gl.glDepthMask(gl.GL_FALSE)
+        # The far-pass bedrock leaves depth unwritten (painter
+        # family, per the docstring), but the near-pass bedrock
+        # MUST write: far-pass surfaces drawn later (the sea
+        # above all) test against the depth buffer, and along a
+        # ray that hits the bedrock inside the split and the sea
+        # beyond it, only a written near depth stops the sea
+        # painting over the ceiling.
+        gl.glDepthMask(gl.GL_TRUE if write_depth else gl.GL_FALSE)
         gl.glUseProgram(self._bedrock_prog)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
@@ -549,6 +556,11 @@ class RDWidget(QOpenGLWidget):
 
         if "sky" not in self.disabled_passes and self._show_far:
             # 1. Sky at infinity: depth exactly 1.0, drawn first, no depth write.
+            # (Far depth range, set here because the sky precedes
+            # the near pass: it writes no depth, and the near
+            # pass's bedrock writes none either, so the sky must
+            # already be down before both.)
+            gl.glDepthRange(0.5, 1.0)
             gl.glDepthMask(gl.GL_FALSE)
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glUseProgram(self._sky_prog)
@@ -562,6 +574,23 @@ class RDWidget(QOpenGLWidget):
             gl.glBindVertexArray(0)
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDepthFunc(gl.GL_LESS)
+
+
+        # One depth buffer, two ranges: the near pass owns
+        # [0, 0.5), the far pass [0.5, 1].  Near geometry is
+        # drawn first; every far depth is larger than every near
+        # depth, so cross-pass visibility is exact with no
+        # mid-frame depth clear (the clear left a shimmery seam
+        # where the bedrock was drawn twice into two buffers'
+        # worth of state).
+        if self._show_near:
+            # 0. Near pass: blocks and bedrock, 3 cm .. split.
+            gl.glDepthRange(0.0, 0.5)
+            if "blocks" not in self.disabled_passes:
+                self._draw_blocks(vp_near, cam_pos, sun)
+            if "bedrock" not in self.disabled_passes:
+                self._draw_bedrock(vp_near, cam_pos, write_depth=True)
+        gl.glDepthRange(0.5, 1.0)
 
         if "blocks" not in self.disabled_passes and self._show_far:
             # 2. Local RD ground (far pass; the near pass redraws
@@ -651,36 +680,28 @@ class RDWidget(QOpenGLWidget):
             # wants it last: draw it again, over the sea and sky.
             self._draw_bedrock(vp, cam_pos)
 
-        if self._show_near:
-            # 8. Near pass: the blocks and bedrock again, with
-            # the near projection.  Colour is not cleared -- near
-            # geometry is nearer than anything the far pass drew,
-            # so drawing after is itself the visibility test for
-            # the overlap; only depth is cleared, so the near
-            # range gets the near pass's own precision.
-            gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
-            if "blocks" not in self.disabled_passes:
-                self._draw_blocks(vp_near, cam_pos, sun)
-            if "bedrock" not in self.disabled_passes:
-                self._draw_bedrock(vp_near, cam_pos)
-
         if self._show_boundary:
-            # 9. Debug overlay: a translucent magenta fence at
-            # the split radius around the camera, marking where
-            # the near pass hands over to the far pass.  A full
-            # cylinder would tint the whole view (the infinity
-            # family writes no depth for it to test against), so
-            # the fence is a band straddling the world's active
-            # heights: it reads as a wall standing on the sea and
-            # terrain at exactly the split distance.
-            seg = 96
+            # 9. Debug overlay: the split itself.  The boundary
+            # is not a cylinder around the camera -- it is the
+            # view plane at eye depth = split, perpendicular to
+            # the view direction (fragments are clipped by eye
+            # z, not by radial distance; at the screen corners
+            # the plane is farther than the split in radial
+            # terms).  Drawn as a translucent magenta quad on
+            # that plane, framed just inside the screen edges,
+            # depth test off so it reads as an overlay.
+            gl.glDepthRange(0.0, 1.0)
+            view = cam.view_matrix()
+            right, upv, back = view[0, :3], view[1, :3], view[2, :3]
+            centre = cam.position - back * DEPTH_SPLIT
+            tan_y = math.tan(FOV_Y / 2.0)
+            tan_x = tan_y * (w / h)
+            ex = right * (DEPTH_SPLIT * tan_x * 0.98)
+            ey = upv * (DEPTH_SPLIT * tan_y * 0.98)
             rows = []
-            for i in range(seg + 1):
-                th = 2.0 * math.pi * i / seg
-                x = cam.position[0] + DEPTH_SPLIT * math.cos(th)
-                z = cam.position[2] + DEPTH_SPLIT * math.sin(th)
-                rows.append((x, -30.0, z, 1.0, 1.0, 0.0, 1.0, 0.30))
-                rows.append((x, 90.0, z, 1.0, 1.0, 0.0, 1.0, 0.30))
+            for sx, sy in ((-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)):
+                p = centre + ex * sx + ey * sy
+                rows.append((p[0], p[1], p[2], 1.0, 1.0, 0.0, 1.0, 0.10))
             data = np.array(rows, dtype=np.float32)
             gl.glBindVertexArray(self._debug_vao)
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._debug_vbo)
@@ -688,6 +709,7 @@ class RDWidget(QOpenGLWidget):
             gl.glEnable(gl.GL_BLEND)
             gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
             gl.glDepthMask(gl.GL_FALSE)
+            gl.glDisable(gl.GL_DEPTH_TEST)
             gl.glUseProgram(self._horizon_prog)
             vp_over = cam.view_projection(FOV_Y, w / h, NEAR_PLANE).astype(np.float32)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp_over)
@@ -695,6 +717,7 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, len(rows))
             gl.glBindVertexArray(0)
             gl.glDepthMask(gl.GL_TRUE)
+            gl.glEnable(gl.GL_DEPTH_TEST)
             gl.glDisable(gl.GL_BLEND)
 
         self._frame += 1
@@ -896,7 +919,7 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     fmt = QSurfaceFormat()
-    fmt.setVersion(3, 3)
+    fmt.setVersion(4, 1)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setSamples(4)

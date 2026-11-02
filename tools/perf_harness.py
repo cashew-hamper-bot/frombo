@@ -121,7 +121,7 @@ def main() -> int:
     args = ap.parse_args()
 
     fmt = QSurfaceFormat()
-    fmt.setVersion(3, 3)
+    fmt.setVersion(4, 1)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setSamples(args.samples)
