@@ -28,7 +28,16 @@ from OpenGL import GL as gl
 from PySide6.QtCore import QElapsedTimer, QPointF, Qt
 from PySide6.QtGui import QCursor, QSurfaceFormat
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from . import planes, shaders, terrain
 from .lattice import (
@@ -109,9 +118,10 @@ class RDWidget(QOpenGLWidget):
         self._smooth = 1.0  # Gouraud shading on the ground patch (G toggles)
         self._show_terrain = True  # distant terrain + horizon ring (T toggles)
         self._show_sea = True  # ocean surface (Y toggles)
+        self._show_bedrock = True  # bedrock layer (options menu)
         self._show_far = True  # far depth pass, split..infinity (F toggles)
         self._show_near = True  # near depth pass, 3 cm..split (N toggles)
-        self._show_boundary = False  # split-plane debug overlay (B toggles)
+        self._show_boundary = False  # split-plane intersection lines (B toggles)
         self._haze_col = np.array(shaders.HAZE_COLOR, dtype=np.float32)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._look_size = None  # (w, h) cached by resizeGL for look math
@@ -128,6 +138,7 @@ class RDWidget(QOpenGLWidget):
         self._last_mouse = None
         self._clock = QElapsedTimer()
         self.on_hud = None  # callable(str), set by the window
+        self.on_escape_menu = None  # callable(), set by the window
         self._frame = 0
         # No repaint timer: frames are event-driven.  update() is
         # called at the moment something changes the view -- a key
@@ -499,6 +510,7 @@ class RDWidget(QOpenGLWidget):
         gl.glUseProgram(self._bedrock_prog)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
+        gl.glUniform1f(gl.glGetUniformLocation(self._bedrock_prog, "uPlaneY"), planes.BEDROCK_Y)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uHazeColor"), 1, self._haze_col)
         gl.glActiveTexture(gl.GL_TEXTURE0)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._checker_tex)
@@ -585,7 +597,7 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthRange(0.0, 0.5)
             if "blocks" not in self.disabled_passes:
                 self._draw_blocks(vp_near, cam_pos, sun)
-            if "bedrock" not in self.disabled_passes:
+            if "bedrock" not in self.disabled_passes and self._show_bedrock:
                 self._draw_bedrock(vp_near, cam_pos)
         gl.glDepthRange(0.5, 1.0)
 
@@ -594,7 +606,7 @@ class RDWidget(QOpenGLWidget):
             # it with its own projection below).
             self._draw_blocks(vp, cam_pos, sun)
 
-        if "bedrock" not in self.disabled_passes and self._show_far:
+        if "bedrock" not in self.disabled_passes and self._show_far and self._show_bedrock:
             # 5. Complete infinite bedrock plane (4 vertices).
             self._draw_bedrock(vp, cam_pos)
 
@@ -651,6 +663,7 @@ class RDWidget(QOpenGLWidget):
             gl.glUseProgram(self._sea_prog)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uPlaneY"), planes.SEA_Y)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uSunDir"), 1, sun)
             gl.glUniform1f(gl.glGetUniformLocation(self._sea_prog, "uHorizonAlpha"), self._sea_horizon_alpha)
             gl.glUniform3fv(gl.glGetUniformLocation(self._sea_prog, "uHazeColor"), 1, self._haze_col)
@@ -673,44 +686,58 @@ class RDWidget(QOpenGLWidget):
         # already keeps the sea behind the ceiling from below.)
 
         if self._show_boundary:
-            # 9. Debug overlay: the split itself.  The boundary
-            # is not a cylinder around the camera -- it is the
-            # view plane at eye depth = split, perpendicular to
-            # the view direction (fragments are clipped by eye
-            # z, not by radial distance; at the screen corners
-            # the plane is farther than the split in radial
-            # terms).  Drawn as a translucent magenta quad on
-            # that plane, framed just inside the screen edges,
-            # depth test off so it reads as an overlay.
-            gl.glDepthRange(0.0, 1.0)
+            # 9. Debug overlay: where the split plane meets the
+            # world.  The boundary is the view plane at eye
+            # depth = split; a translucent quad on that plane
+            # showed nothing useful (it fills the view and, with
+            # depth test off, floats over everything).  What
+            # locates the boundary is its INTERSECTION with the
+            # surfaces -- here, magenta ribbons lying in the
+            # bedrock and sea planes along the line where the
+            # view plane crosses them, depth-tested against the
+            # scene and drawn in both depth ranges with each
+            # pass's own projection, exactly like the bedrock
+            # itself.  The overlay is the scene's one depth
+            # non-writer: it is a guide, not a surface.
             view = cam.view_matrix()
-            right, upv, back = view[0, :3], view[1, :3], view[2, :3]
-            centre = cam.position - back * DEPTH_SPLIT
-            tan_y = math.tan(FOV_Y / 2.0)
-            tan_x = tan_y * (w / h)
-            ex = right * (DEPTH_SPLIT * tan_x * 0.98)
-            ey = upv * (DEPTH_SPLIT * tan_y * 0.98)
+            upv, back = view[1, :3], view[2, :3]
+            fwd = -back
+            centre = cam.position + fwd * DEPTH_SPLIT
+            d = np.array([-fwd[2], 0.0, fwd[0]])
+            dn = float(np.linalg.norm(d))
             rows = []
-            for sx, sy in ((-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)):
-                p = centre + ex * sx + ey * sy
-                rows.append((p[0], p[1], p[2], 1.0, 1.0, 0.0, 1.0, 0.10))
-            data = np.array(rows, dtype=np.float32)
-            gl.glBindVertexArray(self._debug_vao)
-            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._debug_vbo)
-            gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_DRAW)
-            gl.glEnable(gl.GL_BLEND)
-            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-            gl.glDepthMask(gl.GL_FALSE)
-            gl.glDisable(gl.GL_DEPTH_TEST)
-            gl.glUseProgram(self._horizon_prog)
-            vp_over = cam.view_projection(FOV_Y, w / h, NEAR_PLANE).astype(np.float32)
-            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp_over)
-            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 1.0)
-            gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, len(rows))
-            gl.glBindVertexArray(0)
-            gl.glDepthMask(gl.GL_TRUE)
-            gl.glEnable(gl.GL_DEPTH_TEST)
-            gl.glDisable(gl.GL_BLEND)
+            if dn > 1e-6 and abs(float(upv[1])) > 1e-3:
+                d = d / dn
+                perp = np.array([d[2], 0.0, -d[0]]) * 0.6
+                for plane_y in (planes.BEDROCK_Y, planes.SEA_Y):
+                    t = (plane_y + 0.25 - centre[1]) / float(upv[1])
+                    x0 = centre + upv * t
+                    e0, e1 = x0 - d * 1400.0, x0 + d * 1400.0
+                    for ex, sx in ((e0, -1.0), (e0, 1.0), (e1, -1.0), (e1, 1.0)):
+                        p = ex + perp * sx
+                        rows.append((p[0], plane_y + 0.25, p[2], 1.0,
+                                     1.0, 0.0, 1.0, 0.85))
+            if rows:
+                data = np.array(rows, dtype=np.float32)
+                gl.glBindVertexArray(self._debug_vao)
+                gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._debug_vbo)
+                gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_DRAW)
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+                gl.glDepthMask(gl.GL_FALSE)
+                gl.glUseProgram(self._horizon_prog)
+                gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 1.0)
+                loc_vp = gl.glGetUniformLocation(self._horizon_prog, "uVP")
+                for rng, vpx in ((0.0, vp_near), (0.5, vp_far)):
+                    gl.glDepthRange(rng, rng + 0.5)
+                    gl.glUniformMatrix4fv(loc_vp, 1, gl.GL_TRUE, vpx)
+                    gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, 4)
+                    if len(rows) > 4:
+                        gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 4, 4)
+                gl.glBindVertexArray(0)
+                gl.glDepthRange(0.0, 1.0)
+                gl.glDepthMask(gl.GL_TRUE)
+                gl.glDisable(gl.GL_BLEND)
 
         self._frame += 1
         if self.on_hud is not None and self._frame % 6 == 0:
@@ -743,10 +770,14 @@ class RDWidget(QOpenGLWidget):
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            # Esc always leaves mouse capture first; only a second
-            # Esc (while uncaptured) quits.
+            # Esc leaves mouse capture first; pressed while
+            # uncaptured it opens the options menu (which has
+            # the Quit button).  Esc in the menu closes it --
+            # handled by the window, which owns the menu.
             if self._captured:
                 self._set_captured(False)
+            elif self.on_escape_menu is not None:
+                self.on_escape_menu()
             else:
                 self.window().close()
             return
@@ -894,7 +925,7 @@ class MainWindow(QMainWindow):
         )
         self._hud.setText(
             "WASD / IJKL move (horizontal plane) - Space up, C down - "
-            "drag world to look - wheel: speed - G: flat/Gouraud - Esc: quit"
+            "drag world to look - wheel: speed - G: flat/Gouraud - Esc: menu"
         )
         self._hud.move(10, 10)
         self._hud.adjustSize()
@@ -903,6 +934,89 @@ class MainWindow(QMainWindow):
         self._status.setStyleSheet(self._hud.styleSheet())
         self._status.move(10, 44)
         self._gl.on_hud = self._set_status
+        self._gl.on_escape_menu = self._toggle_menu
+        self._menu = self._build_menu()
+        self._menu.hide()
+
+    def _build_menu(self) -> QFrame:
+        """The Esc options panel: layer toggles mirroring the
+        keyboard toggles (plus the bedrock layer, which has no
+        key), the debug toggles, and Resume / Quit buttons."""
+        gl = self._gl
+        panel = QFrame(self)
+        panel.setStyleSheet(
+            "QFrame { background: rgba(10, 14, 20, 225); "
+            "border: 1px solid #4a6076; } "
+            "QLabel, QCheckBox { color: #dfe9f2; font-size: 13px; } "
+            "QPushButton { padding: 4px 14px; font-size: 13px; }"
+        )
+        layout = QVBoxLayout(panel)
+        title = QLabel("Options")
+        title.setStyleSheet("font-size: 15px; font-weight: bold;")
+        layout.addWidget(title)
+        self._menu_checks: dict[str, QCheckBox] = {}
+
+        def add_check(label: str, attr: str) -> None:
+            box = QCheckBox(label)
+            box.setChecked(bool(getattr(gl, attr)))
+            box.toggled.connect(
+                lambda on, a=attr: (setattr(gl, a, on), gl.update()))
+            layout.addWidget(box)
+            self._menu_checks[attr] = box
+
+        add_check("Distant terrain + horizon fan  (T)", "_show_terrain")
+        add_check("Ocean surface  (Y)", "_show_sea")
+        add_check("Bedrock layer", "_show_bedrock")
+        add_check("Far depth pass, 300 m - infinity  (F)", "_show_far")
+        add_check("Near depth pass, 3 cm - 300 m  (N)", "_show_near")
+        add_check("Split-plane intersection lines  (B)", "_show_boundary")
+        smooth = QCheckBox("Smooth (Gouraud) shading  (G)")
+        smooth.setChecked(bool(gl._smooth))
+        smooth.toggled.connect(
+            lambda on: (setattr(gl, "_smooth", 1.0 if on else 0.0),
+                        gl.update()))
+        layout.addWidget(smooth)
+        self._menu_checks["_smooth"] = smooth
+        row = QHBoxLayout()
+        resume = QPushButton("Resume")
+        resume.clicked.connect(self._toggle_menu)
+        quit_btn = QPushButton("Quit")
+        quit_btn.clicked.connect(self.close)
+        row.addWidget(resume)
+        row.addWidget(quit_btn)
+        layout.addLayout(row)
+        panel.adjustSize()
+        return panel
+
+    def _toggle_menu(self) -> None:
+        if self._menu.isVisible():
+            self._menu.hide()
+            self._gl.setFocus()
+            return
+        # Sync the checkboxes from the live flags (keyboard
+        # toggles may have changed them since the last opening).
+        gl = self._gl
+        for attr, box in self._menu_checks.items():
+            value = bool(getattr(gl, attr))
+            if box.isChecked() != value:
+                box.blockSignals(True)
+                box.setChecked(value)
+                box.blockSignals(False)
+        self._menu.adjustSize()
+        self._menu.move(
+            (self.width() - self._menu.width()) // 2,
+            (self.height() - self._menu.height()) // 2,
+        )
+        self._menu.show()
+        self._menu.raise_()
+
+    def keyPressEvent(self, event) -> None:
+        # Esc closes the menu when a menu widget holds focus
+        # (otherwise the GL widget's own Esc handling runs).
+        if event.key() == Qt.Key.Key_Escape and self._menu.isVisible():
+            self._toggle_menu()
+            return
+        super().keyPressEvent(event)
 
     def _set_status(self, text: str) -> None:
         self._status.setText(text)

@@ -82,9 +82,20 @@ PLANE_VERT = """
 #version 330 core
 layout(location = 0) in vec4 aHomog;
 uniform mat4 uVP;
+uniform vec3 uCamPos;
 out vec4 vHomog;
+out vec3 vRay;
 void main() {
     vHomog = aHomog;
+    // Ray from the camera through this vertex: the offset for a
+    // finite vertex, the direction itself for a horizon vertex.
+    // The fragment shaders intersect this ray with the plane
+    // analytically instead of dividing the interpolated
+    // homogeneous position -- that division's phase noise across
+    // the strips' enormous triangles differed between the two
+    // depth passes' clipped triangulations and drew a visible
+    // line on the bedrock at the 300 m split.
+    vRay = aHomog.w > 0.5 ? aHomog.xyz - uCamPos : aHomog.xyz;
     gl_Position = uVP * aHomog;
 }
 """
@@ -92,7 +103,9 @@ void main() {
 _BEDROCK_FRAG = """
 #version 330 core
 in vec4 vHomog;
+in vec3 vRay;
 uniform vec3 uCamPos;
+uniform float uPlaneY;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
 uniform vec3 uHazeColor;
@@ -100,8 +113,9 @@ out vec4 fragColor;
 
 void main() {
     if (vHomog.w <= 0.0) discard;
-    vec3 wp = vHomog.xyz / vHomog.w;
-    float dist = length(wp - uCamPos);
+    float t = (uPlaneY - uCamPos.y) / vRay.y;
+    vec3 wp = uCamPos + vRay * t;
+    float dist = abs(t) * length(vRay);
 
     // Hexagonal pattern from a mipmapped texture (rectangular tile,
     // hexagonal symmetry: small hexes 3-coloured, grouped into big
@@ -126,7 +140,9 @@ _SEA_FRAG = (
     """
 #version 330 core
 in vec4 vHomog;
+in vec3 vRay;
 uniform vec3 uCamPos;
+uniform float uPlaneY;
 uniform vec3 uSunDir;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
@@ -137,8 +153,9 @@ out vec4 fragColor;
     + """
 void main() {
     if (vHomog.w <= 0.0) discard;
-    vec3 wp = vHomog.xyz / vHomog.w;
-    float dist = length(wp - uCamPos);
+    float t = (uPlaneY - uCamPos.y) / vRay.y;
+    vec3 wp = uCamPos + vRay * t;
+    float dist = abs(t) * length(vRay);
 
     // The sea is hexagonal too: the shared pattern texture's alpha
     // holds the hex factor, sampled here at twice the bedrock tile
@@ -246,12 +263,7 @@ uniform vec3 uCamPos;
 uniform vec3 uHazeColor;
 uniform float uDebug;
 out vec4 vColor;
-out vec2 vQuadUv;
-out float vDebug;
 void main() {
-    vDebug = uDebug;
-    vQuadUv = vec2((gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : 0.0,
-                   gl_VertexID >= 2 ? 1.0 : 0.0);
     vec3 lit = aColor.rgb;
     float hazeF = 0.80;
     if (uDebug > 0.5) {
@@ -294,17 +306,8 @@ void main() {
 HORIZON_FRAG = """
 #version 330 core
 in vec4 vColor;
-in vec2 vQuadUv;
-in float vDebug;
 out vec4 fragColor;
 void main() {
-    vec4 c = vColor;
-    if (vDebug > 0.5) {
-        // Debug quad (the depth-split plane): faint fill, strong
-        // border, so it reads as a rectangle hanging in the view.
-        vec2 e = min(vQuadUv, 1.0 - vQuadUv);
-        float b = 1.0 - smoothstep(0.0, 0.025, min(e.x, e.y));
-        c.a = mix(c.a, 0.55, b);
-    }
-    fragColor = c;
-}"""
+    fragColor = vColor;
+}
+"""
