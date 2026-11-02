@@ -214,9 +214,11 @@ class RDWidget(QOpenGLWidget):
         gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, hebo)
         gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, hidx.nbytes, hidx, gl.GL_STATIC_DRAW)
         gl.glEnableVertexAttribArray(0)
-        gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, None)
+        gl.glVertexAttribPointer(0, 4, gl.GL_FLOAT, gl.GL_FALSE, 44, None)
         gl.glEnableVertexAttribArray(1)
-        gl.glVertexAttribPointer(1, 4, gl.GL_FLOAT, gl.GL_FALSE, 32, gl.GLvoidp(16))
+        gl.glVertexAttribPointer(1, 4, gl.GL_FLOAT, gl.GL_FALSE, 44, gl.GLvoidp(16))
+        gl.glEnableVertexAttribArray(2)
+        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, 44, gl.GLvoidp(32))
         gl.glBindVertexArray(0)
         # Debug boundary cylinder (split-radius overlay, key B):
         # same 8-float layout as the horizon ring, dynamic.
