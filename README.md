@@ -119,10 +119,15 @@ holding the sky, planes, terrain, ring and sea, then a *near pass*
 (3 cm to 300 m, ordinary finite projection) redrawing the local
 islands and bedrock into a cleared depth buffer. Distance haze —
 an exponential approach to the sky's horizon colour, capped at
-90% — is a pure function of true view distance in every shader,
+80%, approached asymptotically (12 km scale) — is a pure function of true view distance in every shader,
 so it agrees across the split and the boundary stays invisible.
-**F** / **N** toggle the passes; **B** shows a magenta fence at
-the split radius.
+**F** / **N** toggle the passes; **B** shows the split plane itself: a magenta-framed
+quad on the view plane at eye depth 300 m (the boundary is a
+view-oriented plane, not a cylinder). The two passes share one
+depth buffer through `glDepthRange` — near owns [0, 0.5), far
+[0.5, 1] — so there is no mid-frame depth clear and no seam
+state to shimmer. Contexts are OpenGL 4.1 core (the macOS
+ceiling), GLSL 330.
 
 **Skybox** (`planes.skybox_cube`, `shaders.SKY_*`): the cube's
 vertices are direction vectors, submitted as `vec4(dir, 0.0)`. The
