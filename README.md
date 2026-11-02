@@ -52,8 +52,8 @@ Python ≥ 3.10. Controls:
 | Y | toggle the ocean surface |
 | F | toggle the far depth pass (300 m to infinity) |
 | N | toggle the near depth pass (3 cm to 300 m) |
-| B | toggle the split-boundary debug fence at 300 m |
-| Esc | release mouse capture; press again (uncaptured) to quit |
+| B | toggle the split-plane intersection lines (on bedrock and sea) |
+| Esc | release mouse capture; press again (uncaptured) for the options menu (Quit lives there) |
 
 Movement uses the view azimuth only — looking down and pressing W
 does not descend. Dragging uses the grab-the-world convention of
@@ -117,13 +117,21 @@ frame with a split at 300 m: a *far pass* (300 m to infinity, the
 infinite projection with near = 300; depth error at 10 km ≈ 0.02 m)
 holding the sky, planes, terrain, ring and sea, then a *near pass*
 (3 cm to 300 m, ordinary finite projection) redrawing the local
-islands and bedrock into a cleared depth buffer. Distance haze —
+islands and bedrock in the near depth range (below). Both plane
+shaders compute world position analytically — the fragment's ray
+intersected with the plane — so the bedrock's texture phase is
+identical in the two passes and no line forms at the split.
+Distance haze —
 an exponential approach to the sky's horizon colour, capped at
 80%, approached asymptotically (12 km scale) — is a pure function of true view distance in every shader,
 so it agrees across the split and the boundary stays invisible.
-**F** / **N** toggle the passes; **B** shows the split plane itself: a magenta-framed
-quad on the view plane at eye depth 300 m (the boundary is a
-view-oriented plane, not a cylinder). The two passes share one
+**F** / **N** toggle the passes; **B** shows where the split
+plane (a view-oriented plane at eye depth 300 m, not a cylinder
+and not a sphere) intersects the world: magenta lines lying in
+the bedrock and sea planes along the crossing, depth-tested
+like the surfaces themselves. Esc opens an options menu with
+these toggles as checkboxes — plus the bedrock layer, which
+has no key — and the Quit button. The two passes share one
 depth buffer through `glDepthRange` — near owns [0, 0.5), far
 [0.5, 1] — so there is no mid-frame depth clear and no seam
 state to shimmer. Contexts are OpenGL 4.1 core (the macOS
@@ -185,9 +193,9 @@ out, and there is no giant finite quad to clip or z-fight.
   the sampled land fraction is 0.40 and the median elevation is
   below sea level. Beyond the mesh, a horizon fan joins the
   mesh's own outer edge loop (162 boundary vertices, hex zigzag
-  and all) by triangles to 12 evenly spaced horizon vertices at
-  infinity, each carrying one uniform colour — the mean terrain
-  colour, lit by the diffuse response integrated over a fan of
+  and all) by triangles to 180 evenly spaced horizon vertices at
+  infinity, each carrying one uniform colour — a constant
+  medium dark green/brown for now, lit by the diffuse response integrated over a fan of
   normals tilted from straight up to 45° toward the viewer —
   because each horizon point represents the whole disc; the sea
   is the transparent partner there, its alpha fading at the
