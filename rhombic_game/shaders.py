@@ -83,10 +83,22 @@ PLANE_VERT = """
 layout(location = 0) in vec4 aHomog;
 uniform mat4 uVP;
 uniform vec3 uCamPos;
+uniform vec3 uCamFwd;
 out vec4 vHomog;
 out vec3 vRay;
+out float vEyeDepthH;
 void main() {
     vHomog = aHomog;
+    // Eye depth in homogeneous form: the affine function's
+    // numerator, dot(p - cam, fwd) with p = xyz / w, i.e.
+    // dot(xyz - cam * w, fwd).  For a horizon vertex (w = 0)
+    // this is dot(direction, fwd) -- finite -- and the
+    // fragment divides by the interpolated w, recovering the
+    // true eye depth projectively.  (A flat stand-in like
+    // 1e7 at the horizon vertices poisons the interpolation
+    // across the strips' mixed triangles and the near pass
+    // discarded bedrock it should have drawn.)
+    vEyeDepthH = dot(aHomog.xyz - uCamPos * aHomog.w, uCamFwd);
     // Ray from the camera through this vertex: the offset for a
     // finite vertex, the direction itself for a horizon vertex.
     // The fragment shaders intersect this ray with the plane
@@ -104,7 +116,10 @@ _BEDROCK_FRAG = """
 #version 330 core
 in vec4 vHomog;
 in vec3 vRay;
+in float vEyeDepthH;
 uniform vec3 uCamPos;
+uniform float uClipNear;
+uniform float uClipFar;
 uniform float uPlaneY;
 uniform sampler2D uTex;
 uniform sampler2D uNoise;
@@ -113,6 +128,9 @@ out vec4 fragColor;
 
 void main() {
     if (vHomog.w <= 0.0) discard;
+    float eyeDepth = vEyeDepthH / vHomog.w;
+    if (uClipNear > 0.0 && eyeDepth > uClipNear) discard;
+    if (uClipFar > 0.0 && eyeDepth < uClipFar) discard;
     float t = (uPlaneY - uCamPos.y) / vRay.y;
     vec3 wp = uCamPos + vRay * t;
     float dist = abs(t) * length(vRay);
@@ -141,7 +159,10 @@ _SEA_FRAG = (
 #version 330 core
 in vec4 vHomog;
 in vec3 vRay;
+in float vEyeDepthH;
 uniform vec3 uCamPos;
+uniform float uClipNear;
+uniform float uClipFar;
 uniform float uPlaneY;
 uniform vec3 uSunDir;
 uniform sampler2D uTex;
@@ -153,6 +174,9 @@ out vec4 fragColor;
     + """
 void main() {
     if (vHomog.w <= 0.0) discard;
+    float eyeDepth = vEyeDepthH / vHomog.w;
+    if (uClipNear > 0.0 && eyeDepth > uClipNear) discard;
+    if (uClipFar > 0.0 && eyeDepth < uClipFar) discard;
     float t = (uPlaneY - uCamPos.y) / vRay.y;
     vec3 wp = uCamPos + vRay * t;
     float dist = abs(t) * length(vRay);
@@ -204,15 +228,21 @@ layout(location = 3) in vec3 aColor;
 layout(location = 4) in float aAO;
 uniform mat4 uVP;
 uniform float uSmooth;
+uniform vec3 uCamPos;
+uniform vec3 uCamFwd;
 out vec3 vNormal;
 out vec3 vColor;
 out vec3 vWorld;
 out float vAO;
+out float vEyeDepth;
 void main() {
     vNormal = mix(aNormalFlat, aNormalSmooth, uSmooth);
     vColor = aColor;
     vWorld = aPos;
     vAO = aAO;
+    // Eye depth along the camera forward -- the shared split
+    // plane's coordinate (see the fragment discard).
+    vEyeDepth = dot(aPos - uCamPos, uCamFwd);
     gl_Position = uVP * vec4(aPos, 1.0);
 }
 """
@@ -223,11 +253,23 @@ in vec3 vNormal;
 in vec3 vColor;
 in vec3 vWorld;
 in float vAO;
+in float vEyeDepth;
+uniform float uClipNear;
+uniform float uClipFar;
 uniform vec3 uSunDir;
 uniform vec3 uCamPos;
 uniform vec3 uHazeColor;
 out vec4 fragColor;
 void main() {
+    // Manual split clip: both depth passes discard against
+    // the SAME plane equation (eye depth), with a 1 m
+    // hysteresis band where both draw and depth decides --
+    // the hardware clips of the two (overlapping) projections
+    // no longer define the boundary, so no coverage gap can
+    // open along it.  uClipNear > 0 on near-pass draws,
+    // uClipFar > 0 on far-pass draws, 0 disables that side.
+    if (uClipNear > 0.0 && vEyeDepth > uClipNear) discard;
+    if (uClipFar > 0.0 && vEyeDepth < uClipFar) discard;
     vec3 n = normalize(vNormal);
     // Hemisphere ambient: sky blue from above, warm ground bounce
     // from below, blended by the normal's height.
@@ -273,29 +315,46 @@ void main() {
         hazeF = 0.80 * (1.0 - exp(-dist / 12000.0));
     }
     if (uDebug < 0.5) {
-        // Representative-normal lighting for a horizon point:
-        // integrate the diffuse response over normals tilted
-        // from straight up to 45 degrees toward the viewer.
-        // The far terrain actually presents such a fan of
-        // normals -- every ridge facing us at every tilt, with
-        // lower ground occluded behind it -- so the horizon
-        // colour is that fan's average response, not the
-        // flat-up response (which reads too bright).
-        vec2 toViewer = aHomog.w > 0.5
-            ? normalize(uCamPos.xz - aHomog.xz)
-            : normalize(-aHomog.xz);
         vec3 sunDir = normalize(uSunDir);
-        vec3 acc = vec3(0.0);
-        for (int i = 0; i < 4; i++) {
-            float tilt = radians(15.0 * float(i));
-            vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
-                                    toViewer.y * sin(tilt)));
-            vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
-                            0.5 + 0.5 * n.y);
-            acc += hemi + vec3(0.16)
-                 + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
+        vec3 light;
+        if (aHomog.w > 0.5) {
+            // A finite edge vertex is real terrain, continuous
+            // with the mesh: light it exactly as the block
+            // shader lights an up-facing fragment (hemisphere
+            // sky colour + flat ambient + sun, AO = 1), so the
+            // fan's inner end matches the mesh's edge and the
+            // blend carries terrain colour outward.  (The
+            // earlier build lit edge vertices with the horizon
+            // statistic too -- dimmer and much bluer -- and the
+            // whole band washed to uniform pale gray; a pink
+            // diagnostic proved the colour plumbing was fine
+            // and the lighting response was the gray-maker.)
+            light = vec3(0.50, 0.64, 0.88) + vec3(0.16)
+                  + vec3(1.0, 0.93, 0.80) * max(sunDir.y, 0.0) * 0.95;
+        } else {
+            // Representative-normal lighting for a horizon
+            // point: integrate the diffuse response over
+            // normals tilted from straight up to 45 degrees
+            // toward the viewer.  The far terrain actually
+            // presents such a fan of normals -- every ridge
+            // facing us at every tilt, with lower ground
+            // occluded behind it -- so the horizon colour is
+            // that fan's average response, not the flat-up
+            // response (which reads too bright).
+            vec2 toViewer = normalize(-aHomog.xz);
+            vec3 acc = vec3(0.0);
+            for (int i = 0; i < 4; i++) {
+                float tilt = radians(15.0 * float(i));
+                vec3 n = normalize(vec3(toViewer.x * sin(tilt), cos(tilt),
+                                        toViewer.y * sin(tilt)));
+                vec3 hemi = mix(vec3(0.36, 0.32, 0.28), vec3(0.50, 0.64, 0.88),
+                                0.5 + 0.5 * n.y);
+                acc += hemi + vec3(0.16)
+                     + vec3(1.0, 0.93, 0.80) * max(dot(n, sunDir), 0.0) * 0.95;
+            }
+            light = acc / 4.0;
         }
-        lit = aColor.rgb * (acc / 4.0);
+        lit = aColor.rgb * light;
         lit = mix(lit, uHazeColor, hazeF);
     }
     vColor = vec4(lit, aColor.a);
