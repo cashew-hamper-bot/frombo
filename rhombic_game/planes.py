@@ -73,6 +73,12 @@ def full_plane_strip(
     back-off and the width scale with ``height``.  All of this is
     coverage only -- shading is analytic in the world position.
     """
+    # Coverage is side-agnostic: viewed from below (a camera
+    # under the bedrock looking up), the strip must span the
+    # zenith exactly as it spans the nadir from above.  A signed
+    # height throws the grounding segment to the wrong side and
+    # the plane develops a growing see-through hole overhead.
+    height = abs(height)
     fx, fz = float(forward_xz[0]), float(forward_xz[1])
     rx, rz = fz, -fx  # horizontal right, perpendicular to forward
     s = HORIZON_SPREAD
