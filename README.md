@@ -188,11 +188,17 @@ out, and there is no giant finite quad to clip or z-fight.
   its normal were straight up — identical at every azimuth,
   because each horizon point represents the whole disc; the sea
   is the transparent partner there, its alpha fading at the
-  horizon to sea fraction × base opacity, and it is drawn last.
-  The whole infinity family (sky, bedrock, ring, sea) writes no
-  depth and tests `LEQUAL`: near the horizon their depths tie
-  asymptotically, so painter's order decides. Below bedrock,
-  the bedrock is drawn again last. Distant Horizons' default is
+  horizon to sea fraction × base opacity, and it is drawn last
+  (it is transparent; blending wants the background down first).
+  Depth discipline: the depth buffer decides visibility —
+  bedrock, terrain, sea and blocks all write depth and test
+  `LEQUAL`, so draw order acts only as the tie breaker where
+  depths converge at the horizon. Two abstentions, both narrow:
+  the sky writes nothing (it is the background), and the horizon
+  ring writes nothing — it is the horizon statistic rather than
+  a surface, and the sea's horizon blend must be able to paint
+  over it; it still depth-*tests*, so nearer geometry hides it.
+  Distant Horizons' default is
   256 chunks (~4 km) for comparison. A sparse critical-point
   representation of the terrain is sketched in
   `docs/sparse-terrain.md`.
