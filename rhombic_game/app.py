@@ -111,7 +111,7 @@ class RDWidget(QOpenGLWidget):
         self._show_sea = True  # ocean surface (Y toggles)
         self._show_far = True  # far depth pass, split..infinity (F toggles)
         self._show_near = True  # near depth pass, 3 cm..split (N toggles)
-        self._show_boundary = False  # split-boundary debug cylinder (B toggles)
+        self._show_boundary = False  # split-plane debug overlay (B toggles)
         self._haze_col = np.array(shaders.HAZE_COLOR, dtype=np.float32)
         self._boost = 1.0  # Shift-held speed multiplier (set in _move)
         self._look_size = None  # (w, h) cached by resizeGL for look math
@@ -472,15 +472,17 @@ class RDWidget(QOpenGLWidget):
     def _draw_bedrock(self, vp, cam_pos) -> None:
         """The complete infinite bedrock plane (4 vertices).
 
-        Like every member of the infinity family, it writes no
-        depth and tests LEQUAL: near the horizon, all these
-        surfaces' depths tie asymptotically within a few depth
-        quanta of 1.0 (a deep horizon ring skirt can even lose
-        to the bedrock's far field by ~1e-7 and get bitten out
-        in slabs), so painter's order -- sky, bedrock, terrain,
-        ring, sea -- must decide, not the depth buffer.  The
-        finite geometry (blocks, terrain mesh) still writes
-        depth and occludes them normally.
+        An ordinary depth-writing surface, in both passes: the
+        depth buffer decides visibility, and draw order is only
+        the tie breaker (LEQUAL) for the asymptotic band at the
+        horizon where several surfaces' depths converge on 1.0
+        within a few depth quanta of each other.  (An earlier
+        no-depth-write protocol for the "infinity family" dated
+        from the single-pass era, when depth error at 10 km was
+        ~62 m and writing this plane's depth meant writing
+        noise; the two-pass split made its depth honest, and
+        Christopher's ruling -- painter order is a tie breaker,
+        not a replacement for the depth buffer -- retired it.)
         """
         cam = self.camera
         self._bedrock.upload(
@@ -493,7 +495,7 @@ class RDWidget(QOpenGLWidget):
             )
         )
         gl.glDepthFunc(gl.GL_LEQUAL)
-        gl.glDepthMask(gl.GL_FALSE)
+        gl.glDepthMask(gl.GL_TRUE)
         gl.glUseProgram(self._bedrock_prog)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._bedrock_prog, "uVP"), 1, gl.GL_TRUE, vp)
         gl.glUniform3fv(gl.glGetUniformLocation(self._bedrock_prog, "uCamPos"), 1, cam_pos)
@@ -548,8 +550,15 @@ class RDWidget(QOpenGLWidget):
         gl.glDisable(gl.GL_CULL_FACE)
 
         if "sky" not in self.disabled_passes and self._show_far:
-            # 1. Sky at infinity: depth exactly 1.0, drawn first, no depth write.
-            gl.glDepthMask(gl.GL_FALSE)
+            # 1. Sky at infinity: depth exactly 1.0, drawn first
+            # INTO a buffer just cleared to 1.0, and it WRITES
+            # that depth (LEQUAL admits it against the clear).
+            # From here on, every horizon tie is a tie against a
+            # really-written depth, broken by painter order --
+            # the tie breaker exercised, not assumed.  (Far
+            # depth range, set here because the sky precedes the
+            # near pass.)
+            gl.glDepthRange(0.5, 1.0)
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glUseProgram(self._sky_prog)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sky_prog, "uVP"), 1, gl.GL_TRUE, vp)
@@ -563,17 +572,62 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthMask(gl.GL_TRUE)
             gl.glDepthFunc(gl.GL_LESS)
 
+
+        if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
+            # 2. The horizon ring, drawn second, right after the
+            # sky, because that is what it is: a directional
+            # backdrop.  Its vertex shader projects every vertex
+            # to a direction from the camera, so all its
+            # fragments sit at depth exactly 1.0 -- the same
+            # screen image as the finite ribbon, but honestly at
+            # infinity, where each horizon point represents the
+            # whole disc.  It WRITES that depth and tests LEQUAL:
+            # it wins its tie against the sky by painter order,
+            # and every finite surface drawn later (bedrock,
+            # terrain, sea, blocks) overdraws it by depth
+            # wherever that surface is genuinely in front --
+            # including the sea, whose horizon blend therefore
+            # still paints the land/sea mixture over it.
+            gl.glUseProgram(self._horizon_prog)
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uSunDir"), 1, sun)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uCamPos"), 1, cam_pos)
+            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uHazeColor"), 1, self._haze_col)
+            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 0.0)
+            gl.glBindVertexArray(self._horizon_vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, self._horizon_count, gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            gl.glDepthMask(gl.GL_TRUE)
+            gl.glDepthFunc(gl.GL_LESS)
+
+
+        # One depth buffer, two ranges: the near pass owns
+        # [0, 0.5), the far pass [0.5, 1].  Near geometry is
+        # drawn first; every far depth is larger than every near
+        # depth, so cross-pass visibility is exact with no
+        # mid-frame depth clear (the clear left a shimmery seam
+        # where the bedrock was drawn twice into two buffers'
+        # worth of state).
+        if self._show_near:
+            # 3. Near pass: blocks and bedrock, 3 cm .. split.
+            gl.glDepthRange(0.0, 0.5)
+            if "blocks" not in self.disabled_passes:
+                self._draw_blocks(vp_near, cam_pos, sun)
+            if "bedrock" not in self.disabled_passes:
+                self._draw_bedrock(vp_near, cam_pos)
+        gl.glDepthRange(0.5, 1.0)
+
         if "blocks" not in self.disabled_passes and self._show_far:
-            # 2. Local RD ground (far pass; the near pass redraws
+            # 4. Local RD ground (far pass; the near pass redraws
             # it with its own projection below).
             self._draw_blocks(vp, cam_pos, sun)
 
         if "bedrock" not in self.disabled_passes and self._show_far:
-            # 3. Complete infinite bedrock plane (4 vertices).
+            # 5. Complete infinite bedrock plane (4 vertices).
             self._draw_bedrock(vp, cam_pos)
 
         if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
-            # 4. Distant terrain annulus (block program; uniforms
+            # 6. Distant terrain annulus (block program; uniforms
             # set here so the pass stands alone when "blocks" is
             # disabled by the perf harness).  Far pass only: the
             # annulus starts at 1.5 km, beyond the split.
@@ -588,44 +642,18 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawElements(gl.GL_TRIANGLES, tcount, gl.GL_UNSIGNED_INT, None)
             gl.glBindVertexArray(0)
 
-        if "terrain" not in self.disabled_passes and self._show_terrain and self._show_far:
-            # 5. Terrain horizon ring at infinity: one uniform
-            # statistical colour, identical at every azimuth
-            # (each horizon point represents the whole disc),
-            # opaque -- the sea carries the horizon mixture.
-            # An infinity surface: it writes no depth and tests
-            # LEQUAL, because near the horizon its depths tie
-            # asymptotically with the bedrock's far field (both
-            # tend to exactly 1.0); painter's order -- ring after
-            # bedrock, before sea -- must decide those pixels,
-            # not a depth-precision coin flip.
-            gl.glDepthMask(gl.GL_FALSE)
-            gl.glDepthFunc(gl.GL_LEQUAL)
-            gl.glUseProgram(self._horizon_prog)
-            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uSunDir"), 1, sun)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uCamPos"), 1, cam_pos)
-            gl.glUniform3fv(gl.glGetUniformLocation(self._horizon_prog, "uHazeColor"), 1, self._haze_col)
-            gl.glUniform1f(gl.glGetUniformLocation(self._horizon_prog, "uDebug"), 0.0)
-            gl.glBindVertexArray(self._horizon_vao)
-            gl.glDrawElements(gl.GL_TRIANGLES, self._horizon_count, gl.GL_UNSIGNED_INT, None)
-            gl.glBindVertexArray(0)
-            gl.glDepthMask(gl.GL_TRUE)
-            gl.glDepthFunc(gl.GL_LESS)
-
         if "sea" not in self.disabled_passes and self._show_sea and self._show_far:
-            # 6. The sea, drawn last of the infinity family
-            # (slightly transparent; painter's order keeps the
-            # blending simple).  LEQUAL so that at the horizon,
-            # where everything ties at depth exactly 1.0, the
-            # sea's statistically-thinned horizon alpha blends
-            # over the terrain ring and sky beneath it.
+            # 7. The sea, drawn last because it is transparent
+            # (blending needs the surfaces behind it down first),
+            # not because visibility needs the order: it writes
+            # depth and tests LEQUAL, so the depth buffer decides
+            # where it shows, and LEQUAL merely breaks the
+            # horizon tie in its favour as the later surface.
             self._sea.upload(
                 planes.hole_plane_strip(cam.position[0], cam.position[2], planes.SEA_Y)
             )
             gl.glEnable(gl.GL_BLEND)
             gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-            gl.glDepthMask(gl.GL_FALSE)
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glUseProgram(self._sea_prog)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._sea_prog, "uVP"), 1, gl.GL_TRUE, vp)
@@ -645,42 +673,34 @@ class RDWidget(QOpenGLWidget):
             gl.glDepthFunc(gl.GL_LESS)
             gl.glDisable(gl.GL_BLEND)
 
-        if "bedrock" not in self.disabled_passes and self._show_far and cam.position[1] < planes.BEDROCK_Y:
-            # 7. Below bedrock, the bedrock is the nearest of the
-            # infinity family overhead, so painter's algorithm
-            # wants it last: draw it again, over the sea and sky.
-            self._draw_bedrock(vp, cam_pos)
-
-        if self._show_near:
-            # 8. Near pass: the blocks and bedrock again, with
-            # the near projection.  Colour is not cleared -- near
-            # geometry is nearer than anything the far pass drew,
-            # so drawing after is itself the visibility test for
-            # the overlap; only depth is cleared, so the near
-            # range gets the near pass's own precision.
-            gl.glClear(gl.GL_DEPTH_BUFFER_BIT)
-            if "blocks" not in self.disabled_passes:
-                self._draw_blocks(vp_near, cam_pos, sun)
-            if "bedrock" not in self.disabled_passes:
-                self._draw_bedrock(vp_near, cam_pos)
+        # (No below-bedrock bedrock redraw anymore: it was a
+        # painter-era device for when the bedrock wrote no
+        # depth and the later-drawn sea could paint over the
+        # ceiling.  With depth written everywhere, the buffer
+        # already keeps the sea behind the ceiling from below.)
 
         if self._show_boundary:
-            # 9. Debug overlay: a translucent magenta fence at
-            # the split radius around the camera, marking where
-            # the near pass hands over to the far pass.  A full
-            # cylinder would tint the whole view (the infinity
-            # family writes no depth for it to test against), so
-            # the fence is a band straddling the world's active
-            # heights: it reads as a wall standing on the sea and
-            # terrain at exactly the split distance.
-            seg = 96
+            # 8. Debug overlay: the split itself.  The boundary
+            # is not a cylinder around the camera -- it is the
+            # view plane at eye depth = split, perpendicular to
+            # the view direction (fragments are clipped by eye
+            # z, not by radial distance; at the screen corners
+            # the plane is farther than the split in radial
+            # terms).  Drawn as a translucent magenta quad on
+            # that plane, framed just inside the screen edges,
+            # depth test off so it reads as an overlay.
+            gl.glDepthRange(0.0, 1.0)
+            view = cam.view_matrix()
+            right, upv, back = view[0, :3], view[1, :3], view[2, :3]
+            centre = cam.position - back * DEPTH_SPLIT
+            tan_y = math.tan(FOV_Y / 2.0)
+            tan_x = tan_y * (w / h)
+            ex = right * (DEPTH_SPLIT * tan_x * 0.98)
+            ey = upv * (DEPTH_SPLIT * tan_y * 0.98)
             rows = []
-            for i in range(seg + 1):
-                th = 2.0 * math.pi * i / seg
-                x = cam.position[0] + DEPTH_SPLIT * math.cos(th)
-                z = cam.position[2] + DEPTH_SPLIT * math.sin(th)
-                rows.append((x, -30.0, z, 1.0, 1.0, 0.0, 1.0, 0.30))
-                rows.append((x, 90.0, z, 1.0, 1.0, 0.0, 1.0, 0.30))
+            for sx, sy in ((-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)):
+                p = centre + ex * sx + ey * sy
+                rows.append((p[0], p[1], p[2], 1.0, 1.0, 0.0, 1.0, 0.10))
             data = np.array(rows, dtype=np.float32)
             gl.glBindVertexArray(self._debug_vao)
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._debug_vbo)
@@ -688,6 +708,7 @@ class RDWidget(QOpenGLWidget):
             gl.glEnable(gl.GL_BLEND)
             gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
             gl.glDepthMask(gl.GL_FALSE)
+            gl.glDisable(gl.GL_DEPTH_TEST)
             gl.glUseProgram(self._horizon_prog)
             vp_over = cam.view_projection(FOV_Y, w / h, NEAR_PLANE).astype(np.float32)
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self._horizon_prog, "uVP"), 1, gl.GL_TRUE, vp_over)
@@ -695,6 +716,7 @@ class RDWidget(QOpenGLWidget):
             gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, len(rows))
             gl.glBindVertexArray(0)
             gl.glDepthMask(gl.GL_TRUE)
+            gl.glEnable(gl.GL_DEPTH_TEST)
             gl.glDisable(gl.GL_BLEND)
 
         self._frame += 1
@@ -896,7 +918,7 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     fmt = QSurfaceFormat()
-    fmt.setVersion(3, 3)
+    fmt.setVersion(4, 1)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setSamples(4)

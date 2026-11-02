@@ -119,10 +119,15 @@ holding the sky, planes, terrain, ring and sea, then a *near pass*
 (3 cm to 300 m, ordinary finite projection) redrawing the local
 islands and bedrock into a cleared depth buffer. Distance haze —
 an exponential approach to the sky's horizon colour, capped at
-90% — is a pure function of true view distance in every shader,
+80%, approached asymptotically (12 km scale) — is a pure function of true view distance in every shader,
 so it agrees across the split and the boundary stays invisible.
-**F** / **N** toggle the passes; **B** shows a magenta fence at
-the split radius.
+**F** / **N** toggle the passes; **B** shows the split plane itself: a magenta-framed
+quad on the view plane at eye depth 300 m (the boundary is a
+view-oriented plane, not a cylinder). The two passes share one
+depth buffer through `glDepthRange` — near owns [0, 0.5), far
+[0.5, 1] — so there is no mid-frame depth clear and no seam
+state to shimmer. Contexts are OpenGL 4.1 core (the macOS
+ceiling), GLSL 330.
 
 **Skybox** (`planes.skybox_cube`, `shaders.SKY_*`): the cube's
 vertices are direction vectors, submitted as `vec4(dir, 0.0)`. The
@@ -179,15 +184,27 @@ out, and there is no giant finite quad to clip or z-fight.
   own vertex lattice. The disc is ocean-dominated like Earth's:
   the sampled land fraction is 0.40 and the median elevation is
   below sea level. Beyond 10 km a horizon ring at infinity
-  carries one uniform colour — the mean terrain colour lit as if
-  its normal were straight up — identical at every azimuth,
+  carries one uniform colour — the mean terrain colour, lit by
+  the diffuse response integrated over a fan of normals tilted
+  from straight up to 45° toward the viewer — identical at every azimuth,
   because each horizon point represents the whole disc; the sea
   is the transparent partner there, its alpha fading at the
-  horizon to sea fraction × base opacity, and it is drawn last.
-  The whole infinity family (sky, bedrock, ring, sea) writes no
-  depth and tests `LEQUAL`: near the horizon their depths tie
-  asymptotically, so painter's order decides. Below bedrock,
-  the bedrock is drawn again last. Distant Horizons' default is
+  horizon to sea fraction × base opacity, and it is drawn last
+  (it is transparent; blending wants the background down first).
+  Depth discipline: the depth buffer decides visibility —
+  everything writes depth and tests `LEQUAL`, so draw order is
+  only the tie breaker. The frame opens by clearing depth to
+  1.0 (infinity) and writing the sky at exactly that depth; the
+  horizon ring follows as a second directional backdrop — its
+  vertices are projected to directions from the camera, so it
+  keeps the finite ribbon's screen image while sitting honestly
+  at depth 1.0, winning its tie against the sky by painter
+  order. Every finite surface (bedrock, terrain, sea, blocks)
+  then overdraws both backdrops by depth wherever it is
+  genuinely in front — the sea's horizon blend included. The
+  one non-writer in the scene is the B-key split-plane debug
+  overlay, which is transparent and depth-test-off by design.
+  Distant Horizons' default is
   256 chunks (~4 km) for comparison. A sparse critical-point
   representation of the terrain is sketched in
   `docs/sparse-terrain.md`.
