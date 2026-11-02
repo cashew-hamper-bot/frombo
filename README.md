@@ -192,13 +192,18 @@ out, and there is no giant finite quad to clip or z-fight.
   horizon to sea fraction × base opacity, and it is drawn last
   (it is transparent; blending wants the background down first).
   Depth discipline: the depth buffer decides visibility —
-  bedrock, terrain, sea and blocks all write depth and test
-  `LEQUAL`, so draw order acts only as the tie breaker where
-  depths converge at the horizon. Two abstentions, both narrow:
-  the sky writes nothing (it is the background), and the horizon
-  ring writes nothing — it is the horizon statistic rather than
-  a surface, and the sea's horizon blend must be able to paint
-  over it; it still depth-*tests*, so nearer geometry hides it.
+  everything writes depth and tests `LEQUAL`, so draw order is
+  only the tie breaker. The frame opens by clearing depth to
+  1.0 (infinity) and writing the sky at exactly that depth; the
+  horizon ring follows as a second directional backdrop — its
+  vertices are projected to directions from the camera, so it
+  keeps the finite ribbon's screen image while sitting honestly
+  at depth 1.0, winning its tie against the sky by painter
+  order. Every finite surface (bedrock, terrain, sea, blocks)
+  then overdraws both backdrops by depth wherever it is
+  genuinely in front — the sea's horizon blend included. The
+  one non-writer in the scene is the B-key split-plane debug
+  overlay, which is transparent and depth-test-off by design.
   Distant Horizons' default is
   256 chunks (~4 km) for comparison. A sparse critical-point
   representation of the terrain is sketched in
